@@ -2,17 +2,23 @@
 // 职责：打开直播间页面 → 收 WS 帧 → 解码 Like/Member/Chat → 200ms 批量上报
 //      core（档案分离协议）+ 房间状态机（换房/下播/风控检测）。
 // 纯被动：从不向 WS 发帧、不调业务接口、无登录要求。
+// 长跑自愈（v0.1.1）：WS 静默看门狗（刷新→重建递进）+ core 看护（互为守护）。
 
 import { chromium, type Page } from 'patchright';
 import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { decodePushFrame } from '../pb.js';
 import { parseChat, parseLike, parseMember, type UserProfile } from '../messages.js';
 
 const CORE_WS = process.env.CORE_WS_URL ?? 'ws://127.0.0.1:17730/agent';
 const TOKEN = process.env.AGENT_TOKEN ?? '';
 const PROFILE_DIR = process.env.CHROME_PROFILE_DIR ?? path.resolve('data', 'chrome-profile');
+const HERE = path.dirname(fileURLToPath(import.meta.url));       // server/src/capture
+const SERVER_DIR = path.resolve(HERE, '..', '..');               // server/
+const CORE_ENTRY = path.resolve(HERE, '..', 'index.ts');
 // 多路采集：抖音对点赞广播流是抽样下发（实测单连接 coverage 仅 3~8 成），
 // N 个并发标签各自独立抽样，core 按 msgId 去重合并 → 覆盖率指数提升。
 const TABS = Math.max(1, Math.min(4, Number(process.env.CAPTURE_TABS ?? 2)));
@@ -26,6 +32,7 @@ let lastRoomSent = '';
 let lastOnlineSent = 0;
 let ws: WebSocket | null = null;
 let shuttingDown = false;
+let wsConnectedAt = 0;          // 最近一次与 core 建连时刻（看护用）
 
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
@@ -33,7 +40,11 @@ function connectCore() {
   if (shuttingDown) return;
   const sock = new WebSocket(`${CORE_WS}?token=${encodeURIComponent(TOKEN)}`, { handshakeTimeout: 5000 });
   ws = sock;
-  sock.on('open', () => { log('已连接 core'); sock.send(JSON.stringify({ t: 'hello', ver: 1 })); });
+  sock.on('open', () => {
+    log('已连接 core');
+    wsConnectedAt = Date.now();
+    sock.send(JSON.stringify({ t: 'hello', ver: 1 }));
+  });
   sock.on('message', raw => {
     let m: any; try { m = JSON.parse(raw.toString()); } catch { return; }
     if (m.t === 'watch' && m.url) void watchRoom(String(m.url));
@@ -46,6 +57,34 @@ function connectCore() {
   });
   sock.on('error', () => { try { sock.terminate(); } catch {} });
 }
+
+// ── core 看护（互为守护闭环）：core 异常退出 → 本进程拉起 core ──
+let coreRestarts: number[] = [];
+let coreWatchdog = setInterval(() => {
+  if (shuttingDown) return;
+  // 已连接 → 正常
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  // 冷启动/断连宽限 90s（重连循环 connectCore 每 3s 自跑），仍无连接才判死
+  if (!wsConnectedAt || Date.now() - wsConnectedAt < 90_000) return;
+  const now = Date.now();
+  coreRestarts = coreRestarts.filter(t => now - t < 30 * 60_000);
+  if (coreRestarts.length >= 5) { log('core 重启超限（30min/5 次），停止看护，等待人工排查'); clearInterval(coreWatchdog); return; }
+  coreRestarts.push(now);
+  log(`core 已 90s 无法连上（疑似崩溃）→ 自动拉起 core（第 ${coreRestarts.length} 次/30min）`);
+  try {
+    const logFd = fs.openSync(path.resolve(SERVER_DIR, '..', 'data', 'core.log'), 'a');
+    const child = spawn(process.execPath, ['--import', 'tsx', CORE_ENTRY], {
+      cwd: SERVER_DIR, env: process.env, detached: true,
+      stdio: ['ignore', logFd, logFd], windowsHide: true,
+    });
+    child.unref();
+    fs.closeSync(logFd);
+  } catch (e) { log('拉起 core 失败', e); }
+}, 15_000);
+
+// ── 长跑兜底 ──
+process.on('uncaughtException', e => console.error('[capture 异常兜底]', e));
+process.on('unhandledRejection', e => console.error('[capture Promise兜底]', e));
 const send = (o: unknown) => { try { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); } catch {} };
 
 function noteProfile(u: UserProfile | null) {
@@ -97,6 +136,16 @@ async function launchBrowser() {
 }
 
 let relaunchCount = 0; let relaunchTimes: number[] = [];
+/** 清理残留的捕获 Chrome（只杀命令行含本 profile 目录的进程，绝不误伤用户自己的浏览器） */
+function killStaleChrome() {
+  try {
+    const esc = PROFILE_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, "''");
+    spawnSync('powershell', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | Where-Object { $_.CommandLine -match '${esc}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`],
+      { timeout: 15_000 });
+    log('已清理残留捕获 Chrome（仅限本 profile）');
+  } catch {}
+}
 async function relaunch() {
   const now = Date.now();
   relaunchTimes = relaunchTimes.filter(t => now - t < 600_000);
@@ -104,7 +153,11 @@ async function relaunch() {
   relaunchTimes.push(now);
   try { await ctx?.close(); } catch {}
   try { await launchBrowser(); if (currentRoomUrl) await gotoRoom(currentRoomUrl); }
-  catch (e) { log('浏览器重启失败', e); setTimeout(() => void relaunch(), 15_000); }
+  catch (e) {
+    log('浏览器重启失败', e);
+    killStaleChrome();                       // profile 被残留进程占用时的防呆清理
+    setTimeout(() => void relaunch(), 15_000);
+  }
 }
 
 function wirePage(page: Page) {
@@ -125,6 +178,7 @@ function wirePage(page: Page) {
       try {
         const p = frame.payload;
         const buf = Buffer.isBuffer(p) ? p : Buffer.from(String(p));
+        lastFrameAt = Date.now();                 // 任何帧（含心跳 "hi"）都是生命迹象
         if (buf.length < 8) return;               // 心跳 "hi" 等
         const msgs = decodePushFrame(buf);
         if (!msgs) return;
@@ -133,6 +187,26 @@ function wirePage(page: Page) {
     });
   });
 }
+
+// ── WS 静默看门狗（长跑自愈）：断网/睡眠唤醒/页面假死 → 刷新 → 重建 ──
+let lastFrameAt = Date.now();
+let wdReloads = 0;
+setInterval(() => {
+  if (shuttingDown || !ctx) return;
+  if (!/live\.douyin\.com\/\d{6,13}/.test(lastUrl)) return;   // 只看在房状态
+  const silentMs = Date.now() - lastFrameAt;
+  if (silentMs < 60_000) { wdReloads = 0; return; }
+  lastFrameAt = Date.now();
+  if (silentMs > 180_000 || wdReloads >= 3) {
+    log(`WS 静默 ${Math.round(silentMs / 1000)}s 且刷新无效 → 重建浏览器（断网/睡眠自愈）`);
+    wdReloads = 0;
+    void relaunch();
+  } else {
+    wdReloads++;
+    log(`WS 静默 ${Math.round(silentMs / 1000)}s → 刷新页面自愈 (#${wdReloads})`);
+    void reloadRoom();
+  }
+}, 20_000);
 
 function handleMsg(method: string, payload: Buffer) {
   if (method === 'WebcastLikeMessage') {

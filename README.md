@@ -6,6 +6,7 @@ _👑 实时点赞排位 · 冠军荣耀 · 纯被动旁听_
 
 <a href="https://github.com/SrQingChen/douyin-likeboard/releases/latest"><img src="https://img.shields.io/github/v/release/SrQingChen/douyin-likeboard?style=flat-square&color=7c3aed&label=release" alt="Release"></a>
 <a href="https://github.com/SrQingChen/douyin-likeboard/blob/main/LICENSE"><img src="https://img.shields.io/github/license/SrQingChen/douyin-likeboard?style=flat-square&color=3fb950&label=license" alt="GPL-3.0"></a>
+<a href="https://github.com/SrQingChen/douyin-likeboard/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/SrQingChen/douyin-likeboard/ci.yml?style=flat-square&color=f97316&label=CI" alt="CI"></a>
 <a href="https://github.com/SrQingChen/douyin-likeboard/releases"><img src="https://img.shields.io/github/downloads/SrQingChen/douyin-likeboard/total?style=flat-square&color=34d399&label=downloads" alt="Downloads"></a>
 <a href="https://github.com/SrQingChen/douyin-likeboard/commits/main"><img src="https://img.shields.io/github/last-commit/SrQingChen/douyin-likeboard/main?style=flat-square&color=22d3ee&label=last%20commit" alt="Last commit"></a>
 <br>
@@ -40,6 +41,7 @@ _👑 实时点赞排位 · 冠军荣耀 · 纯被动旁听_
 | 🪟 | **桌面透明窗口** | Electron 无边框 + **背景透明通道** + 可拖动 + 鼠标穿透（Ctrl+Alt+B 解锁）；OBS 采集另有浏览器源透明版 |
 | 💾 | **全量持久化** | SQLite(WAL)：用户档案 / 昵称变更全历史 / 场次轮次 / 全局纪录；30s 轮内 checkpoint，崩溃最多丢 30s，重启不发虚奖 |
 | 🧊 | **防呆设计** | 单实例锁、浏览器自动兜底（无 Chrome 用内置 Chromium）、重复启动语义化提示、危险操作二次确认、捕获崩溃自动复活 |
+| 🌙 | **长跑自愈（v0.1.1）** | WS 静默看门狗（刷新→重建递进自愈，覆盖断网/睡眠唤醒）· **core↔capture 互为守护**（任一方崩溃另一方自动拉起，限流防抖）· 日志自动轮转 · 异常兜底不致崩 · 残留 Chrome 防呆清理 · 开机自启开关 |
 | 📦 | **零部署便携包** | 内置 Node 运行时 + 内置 Chromium + Electron —— **空白机解压即用**，首次启动带 5 步部署进度窗 |
 
 ---
@@ -114,6 +116,7 @@ cd ../server && node --import tsx scripts/sim-capture.mjs --rate 40
 |---|---|
 | `node --import tsx scripts/replay-test.mjs` | 真实录制帧回放：int64 无损 / Σcount=5551 分毫不差 / 去重 / 并列结算 / 徽章 / 崩溃恢复，24 断言 |
 | `node --import tsx scripts/perf-test.mjs` | 1000 msg/s 压测：零丢失、快照 <10ms、3000 用户结算 30ms |
+| `node --import tsx scripts/soak-test.mjs` | **长跑压测**：默认 1h@300msg/s+观众陆续进场+周期结算，断言零丢失与内存无单调泄漏 |
 | `node --import tsx scripts/dom-check.mjs` | 控制台+榜单 DOM 验收 24 项（需 core 运行中） |
 | `node --import tsx scripts/sim-capture.mjs` | 合成点赞流（连点器形态），驱动 UI/演示 |
 

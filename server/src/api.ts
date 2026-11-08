@@ -2,7 +2,7 @@
 import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { avatarPath } from './avatars.js';
 import { agentCtl } from './agent.js';
@@ -134,6 +134,34 @@ export function registerApi(app: FastifyInstance, engine: Engine, store: Store, 
     }
     spawn(exe, [path.resolve(here, '..', '..', 'desktop')], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
     return { ok: true };
+  });
+
+  // ── 开机自启（HKCU Run 键，无需管理员；指向一键启动.bat）──
+  const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+  const RUN_VALUE = 'LikeBoard';
+  const batPath = path.resolve(here, '..', '..', '一键启动.bat');
+  const regQuery = () => {
+    try {
+      const r = spawnSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { timeout: 8000, encoding: 'utf-8' });
+      return r.status === 0 && (r.stdout ?? '').includes(RUN_VALUE);
+    } catch { return false; }
+  };
+  app.get('/api/autostart', async () => ({ enabled: regQuery() }));
+  app.post('/api/autostart', async (req, reply) => {
+    const { enable } = (req.body ?? {}) as { enable?: boolean };
+    if (!fs.existsSync(batPath)) return reply.code(404).send({ ok: false, error: '未找到 一键启动.bat' });
+    // 有无窗启动器（vbs）则无感启动，否则直接指 bat（会闪一下黑框）
+    const vbs = path.resolve(here, '..', '..', 'scripts-silent.vbs');
+    const target = fs.existsSync(vbs)
+      ? `"wscript.exe" "${vbs}"`
+      : `"${batPath}"`;
+    const args = enable
+      ? ['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', target, '/f']
+      : ['delete', RUN_KEY, '/v', RUN_VALUE, '/f'];
+    const r = spawnSync('reg', args, { timeout: 8000 });
+    if (r.status !== 0) return reply.code(500).send({ ok: false, error: '注册表写入失败' });
+    hub.log(enable ? '已开启开机自启' : '已关闭开机自启');
+    return { ok: true, enabled: regQuery() };
   });
 
   app.post('/api/shutdown', async () => {

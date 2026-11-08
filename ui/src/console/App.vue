@@ -14,7 +14,7 @@ const tabs = [
   { key: 'settings', label: '设置' },
 ] as const;
 
-const APP_VERSION = '0.1.0';
+import { APP_VERSION } from '../shared/version';
 
 const snap = computed(() => roState.snap);
 const captureLabel = computed(() => ({

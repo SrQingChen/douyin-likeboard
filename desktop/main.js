@@ -16,7 +16,7 @@ const H = Math.max(420, Number(getArg('height', 960)) || 960);
 const BASE = getArg('url', 'http://127.0.0.1:17730');
 const SELFTEST = args.includes('--selftest');
 const SETUP = args.includes('--setup');
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const AUTHOR = 'SrQingChen';
 // 项目根：electron.exe desktop 启动时 appPath = desktop → 上级即根
 const ROOT = path.dirname(app.getAppPath ? app.getAppPath() : __dirname);
@@ -185,6 +185,15 @@ function runSetup() {
     if (!running) {
       const serverDir = path.join(ROOT, 'server');
       const logPath = path.join(ROOT, 'data', 'core.log');
+      // 日志轮转（长跑防膨胀）：>20MB 滚动保留 1 代
+      try {
+        if (fs.existsSync(logPath) && fs.statSync(logPath).size > 20 * 1024 * 1024) {
+          const old = logPath + '.1';
+          try { fs.rmSync(old, { force: true }); } catch {}
+          fs.renameSync(logPath, old);
+          win.webContents.send('setup-step', { id: 'core', status: 'run', detail: '上一轮日志已归档 core.log.1' });
+        }
+      } catch {}
       const fd = fs.openSync(logPath, 'a');
       const env = { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath || process.env.PLAYWRIGHT_BROWSERS_PATH || '' };
       if (!browsersPath) delete env.PLAYWRIGHT_BROWSERS_PATH;

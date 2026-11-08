@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install server deps
+        working-directory: server
+        run: npm install --no-audit --no-fund
+      - name: Typecheck
+        working-directory: server
+        run: npm run typecheck
+      - name: Replay test (real recorded frames, 24 assertions)
+        working-directory: server
+        run: node --import tsx scripts/replay-test.mjs
+      - name: Perf test (1000 msg/s)
+        working-directory: server
+        run: node --import tsx scripts/perf-test.mjs --rate 1000 --dur 10
+      - name: Install UI deps & build
+        working-directory: ui
+        run: |
+          npm install --no-audit --no-fund
+          npm run build

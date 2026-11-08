@@ -168,7 +168,7 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
 
     <!-- 水印（低调，主播可忽略；观众侧不显眼） -->
     <div class="absolute bottom-0.5 right-2 text-[10px] text-white/25 select-none pointer-events-none z-30 tracking-wide">
-      LikeBoard v0.1.0
+      LikeBoard v0.1.1
     </div>
 
     <Confetti ref="confetti" />

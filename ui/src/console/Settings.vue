@@ -10,6 +10,18 @@ const stats = ref<any>(null);
 const wipeArmed = ref(false);
 const wipeText = ref('');
 const wiping = ref(false);
+const autostart = ref(false);
+const autostartBusy = ref(false);
+
+onMounted(async () => { try { autostart.value = (await api('/api/autostart')).enabled; } catch {} });
+async function toggleAutostart() {
+  autostartBusy.value = true;
+  try {
+    const r = await post('/api/autostart', { enable: !autostart.value });
+    autostart.value = r.enabled;
+  } catch (e: any) { alert('设置失败：' + e.message); }
+  autostartBusy.value = false;
+}
 
 function wipeStep1() { wipeArmed.value = true; wipeText.value = ''; }
 async function wipe() {
@@ -86,6 +98,12 @@ async function openBoard(mode: string) {
         <label class="flex items-center justify-between gap-4">
           <span>core 启动时自动拉起捕获窗口</span>
           <input v-model="cfg.autostartCapture" type="checkbox" class="w-4 h-4" style="width: auto" />
+        </label>
+        <label class="flex items-center justify-between gap-4">
+          <span>开机自启<span class="text-white/40 block text-[11px]">写入当前用户注册表（HKCU Run，无需管理员），登录 Windows 后自动启动小助手</span></span>
+          <button class="btn" :class="{ 'tab-active': autostart }" :disabled="autostartBusy" @click="toggleAutostart">
+            {{ autostart ? '✓ 已开启（点此关闭）' : '已关闭（点此开启）' }}
+          </button>
         </label>
         <div class="flex items-center gap-3">
           <button class="btn btn-primary" @click="save">保存（热生效）</button>

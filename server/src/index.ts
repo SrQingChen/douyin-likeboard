@@ -135,6 +135,15 @@ async function shutdown() {
 process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 
+// ── 长跑兜底：异常不致崩（记录后继续；守护链路另由 capture 看护）──
+process.on('uncaughtException', e => {
+  console.error('[异常兜底] uncaughtException:', e);
+  hub.log(`⚠️ 异常兜底：${String(e).slice(0, 200)}`);
+});
+process.on('unhandledRejection', e => {
+  console.error('[异常兜底] unhandledRejection:', e);
+});
+
 const cfg0 = loadConfig();
 await app.listen({ port: cfg0.port, host: '127.0.0.1' });
 console.log(`core 已启动：http://127.0.0.1:${cfg0.port}（控制台）/ board（榜单）`);
