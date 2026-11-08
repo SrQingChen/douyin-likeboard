@@ -1,0 +1,16 @@
+# 运行时数据（每人本地）
+data/
+*.log
+
+# 依赖与构建产物（可重建）
+node_modules/
+ui/dist/
+
+# 便携包产物（走 GitHub Releases）
+release/
+browsers/
+legal/
+*.zip
+
+# 系统
+Thumbs.db

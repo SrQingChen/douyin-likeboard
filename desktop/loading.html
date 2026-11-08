@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .card {
+    margin: 24px auto; padding: 28px 22px; width: calc(100% - 48px);
+    border-radius: 16px; text-align: center;
+    background: rgba(10, 15, 31, 0.82); color: #e7ecff;
+    border: 1px solid rgba(255,255,255,0.12); backdrop-filter: blur(10px);
+    box-sizing: border-box;
+  }
+  .dot { display: inline-block; width: 8px; height: 8px; margin: 0 3px; border-radius: 50%;
+    background: #ffd76a; animation: blink 1.2s infinite; }
+  .dot:nth-child(2) { animation-delay: .2s; } .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+  h2 { font-size: 15px; margin: 0 0 8px; }
+  p { font-size: 12px; color: rgba(231,236,255,.55); margin: 0; line-height: 1.7; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>👑 点赞排行榜</h2>
+    <p>正在等待小助手核心启动…<span class="dot"></span><span class="dot"></span><span class="dot"></span></p>
+    <p>启动核心后此窗口自动进入榜单<br>（双击「一键启动.bat」）</p>
+  </div>
+</body>
+</html>

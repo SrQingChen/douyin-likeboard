@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0a0f1f; overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif; color: #e7ecff; }
+  body { display: flex; flex-direction: column; padding: 20px 24px 16px; }
+  header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .logo { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, #ffd76a, #f472b6);
+    display: flex; align-items: center; justify-content: center; font-size: 17px; }
+  h1 { font-size: 15px; font-weight: 700; }
+  .sub { font-size: 11px; color: rgba(231,236,255,.45); margin-top: 2px; }
+  .steps { flex: 1; display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+  .step { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 5px 8px; border-radius: 8px;
+    background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.05); transition: all .25s; }
+  .step .ico { width: 18px; text-align: center; flex-shrink: 0; font-size: 13px; color: rgba(231,236,255,.3); }
+  .step .lbl { color: rgba(231,236,255,.5); transition: color .25s; }
+  .step.run { border-color: rgba(255,215,106,.35); background: rgba(255,215,106,.06); }
+  .step.run .lbl { color: #ffd76a; } .step.run .ico { color: #ffd76a; }
+  .step.ok .lbl { color: #e7ecff; } .step.ok .ico { color: #34d399; }
+  .step.fail { border-color: rgba(244,63,94,.5); background: rgba(244,63,94,.08); }
+  .step.fail .lbl, .step.fail .ico { color: #fda4af; }
+  .detail { font-size: 11px; color: rgba(231,236,255,.4); margin-left: auto; max-width: 55%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,.07); margin: 14px 0 8px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; border-radius: 3px; background: linear-gradient(90deg, #ffd76a, #f472b6);
+    transition: width .45s cubic-bezier(.22,1,.36,1); }
+  footer { display: flex; justify-content: space-between; font-size: 10.5px; color: rgba(231,236,255,.3); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">👑</div>
+    <div>
+      <h1>点赞排行榜小助手</h1>
+      <div class="sub">v0.1.0 · SrQingChen · GPL-3.0 · 首次启动自检</div>
+    </div>
+  </header>
+  <div class="steps" id="steps"></div>
+  <div class="bar"><div id="fill"></div></div>
+  <footer><span id="status">正在准备…</span><span>被动旁听 · 不发送任何数据</span></footer>
+<script>
+  const steps = [
+    ['node', '运行环境（Node.js）'],
+    ['browser', '浏览器检测'],
+    ['data', '数据目录初始化'],
+    ['core', '核心服务启动'],
+    ['console', '打开控制台'],
+  ];
+  const box = document.getElementById('steps');
+  const el = {};
+  for (const [id, label] of steps) {
+    const d = document.createElement('div');
+    d.className = 'step';
+    d.innerHTML = `<span class="ico">○</span><span class="lbl">${label}</span><span class="detail" id="d-${id}"></span>`;
+    box.appendChild(d);
+    el[id] = d;
+  }
+  const fill = document.getElementById('fill'), status = document.getElementById('status');
+  let done = 0;
+  window.electronBoard.onSetupStep(s => {
+    const d = el[s.id];
+    if (!d) return;
+    d.classList.remove('run'); d.classList.add(s.status);
+    d.querySelector('.ico').textContent = s.status === 'ok' ? '✓' : s.status === 'fail' ? '✕' : '…';
+    if (s.detail) d.querySelector('.detail').textContent = s.detail;
+    d.querySelector('.detail').title = s.detail || '';
+    if (s.status === 'ok' || s.status === 'fail') {
+      if (s.status === 'ok') done++;
+      fill.style.width = Math.round((done / steps.length) * 100) + '%';
+      status.textContent = s.status === 'fail' ? '部署受阻 — 请按提示排查后重试' : s.detail || '完成';
+    }
+  });
+</script>
+</body>
+</html>
