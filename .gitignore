@@ -14,3 +14,4 @@ legal/
 
 # 系统
 Thumbs.db
+.secrets/
