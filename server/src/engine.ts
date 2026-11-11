@@ -6,16 +6,40 @@ import { getConfig } from './config.js';
 
 export interface SettleResult {
   roundIdx: number;
-  top: { rank: number; secUid: string; nick: string; likes: number }[];
+  top: { rank: number; secUid: string; nick: string; likes: number; avatar?: string | null }[];
   ceremony: 'champion' | 'record' | 'normal'; // 全屏彩带 / 轻量 toast 分级
   recordBroken: string | null;
   settleType: string;
 }
 
+export interface SpeedSurge {
+  id: number;
+  secUid: string;
+  nick: string;
+  avatar?: string | null;
+  speed: number;      // 10s 窗口折算 赞/分
+  threshold: number;  // 触发阈值（配置）
+  startedAt: number;
+  endsAt: number;     // 横幅停留截止（冲刺持续期间不断顺延）
+}
+
+export interface ChatEvent {
+  id: number;
+  secUid: string;
+  nick: string;
+  avatar?: string | null;
+  text: string;
+  at: number;
+}
+
 export interface EngineEvents {
   onToast: (t: { kind: 'settle' | 'milestone' | 'session'; data: unknown }) => void;
   onLog: (msg: string) => void;
+  onChat: (c: ChatEvent) => void;
 }
+
+/** 高能冲刺横幅停留时长（无新冲刺时再显示这么久） */
+export const SURGE_LINGER_MS = 4_000;
 
 export class Engine {
   agg = new Aggregator();
@@ -29,7 +53,71 @@ export class Engine {
   private settleTimer: ReturnType<typeof setInterval> | null = null;
   private checkpointTimer: ReturnType<typeof setInterval> | null = null;
 
+  // ── 高能冲刺（免费动效：10s 窗口速度达标即触发鎏金；无任何付费入口）──
+  surge: SpeedSurge | null = null;
+  private surgeSeq = 0;
+  private chatSeq = 0;
+  private chatAt = new Map<string, number>();
+
   constructor(private store: Store, private ev: EngineEvents) {}
+
+  /** 每秒调用：检测冲刺最快用户并刷新横幅（榜单行级鎏金由快照 surge 字段驱动） */
+  tickSurge(nowMs = Date.now()): void {
+    const threshold = getConfig().surgeThreshold;
+    const top = this.agg.topSurge(nowMs, threshold);
+    if (top) {
+      const keep = this.surge && this.surge.secUid === top.secUid;
+      this.surge = {
+        id: keep ? this.surge!.id : ++this.surgeSeq,
+        secUid: top.secUid, nick: top.nick, avatar: top.avatar ?? null, speed: top.speed, threshold,
+        startedAt: keep ? this.surge!.startedAt : nowMs,
+        endsAt: nowMs + SURGE_LINGER_MS,
+      };
+    } else if (this.surge && nowMs >= this.surge.endsAt) {
+      this.surge = null;
+    }
+  }
+
+  /** 当前有效冲刺（过期自动清除） */
+  activeSurge(nowMs = Date.now()): SpeedSurge | null {
+    if (this.surge && nowMs >= this.surge.endsAt) this.surge = null;
+    return this.surge;
+  }
+
+  /** 用户库清空后的内存复位：丢弃全部档案与当前会话；若仍在房间则立即开新场。
+   *  不清 captureState / 配置 / 登录态——捕获进程继续跑，新赞从 0 重新积累。 */
+  wipeUsers(): { room: string } {
+    const room = { webRid: this.agg.room.webRid, anchor: this.agg.room.anchor, online: this.agg.room.online };
+    this.agg = new Aggregator();
+    this.sessionId = null;
+    this.roundId = null;
+    this.roundIdx = 0;
+    this.roundStartedAt = 0;
+    this.sessionStartedAt = 0;
+    this.sessionBumped.clear();
+    this.milestoneFired.clear();
+    this.chatAt.clear();
+    this.surge = null;
+    this.lastSettleAt = 0;
+    if (room.webRid) {
+      this.startSession(room.webRid, room.anchor || null);
+      this.agg.room.online = room.online;
+    }
+    return { room: room.webRid };
+  }
+
+  /** 评论事件：仅关键词「加入」触发播报（同用户 5s 节流，防刷屏） */
+  onChat(secUid: string, nickHint: string, text: string, atMs = Date.now()): ChatEvent | null {
+    const t = (text ?? '').trim();
+    if (!secUid || !t.includes('加入')) return null;
+    if (atMs - (this.chatAt.get(secUid) ?? 0) < 5000) return null;
+    this.chatAt.set(secUid, atMs);
+    const p = this.agg.profileOf(secUid);
+    const nick = (p?.nickClean ?? p?.nick) || nickHint || '赞友';
+    const ev: ChatEvent = { id: ++this.chatSeq, secUid, nick: nick || '赞友', avatar: p?.avatar ?? null, text: t.slice(0, 60), at: atMs };
+    this.ev.onChat(ev);
+    return ev;
+  }
 
   // ── 捕获状态流 ──
   setCaptureState(s: string, reason?: string) {
@@ -39,13 +127,15 @@ export class Engine {
   }
 
   /** capture 上报房间信息（webRid 变化 → 换场） */
-  onRoom(webRid: string, anchor: string | null, online: number) {
+  onRoom(webRid: string, anchor: string | null, online: number, likeTotal = 0) {
     if (webRid && webRid !== this.agg.room.webRid) {
       if (this.sessionId) this.endSession('room-switch');
       this.startSession(webRid, anchor);
     }
     if (anchor) this.agg.room.anchor = anchor;
     if (online > 0) this.agg.room.online = online;
+    // 进房时的页面「本场点赞」只用于首帧展示；后续以 LikeMessage.total 为准
+    if (likeTotal > 0 && this.agg.room.roomTotal < 0) this.agg.room.roomTotal = likeTotal;
   }
 
   startSession(webRid: string, anchor: string | null) {
@@ -81,10 +171,10 @@ export class Engine {
   }
 
   /** 档案入账（agent/回放共用）：聚合层 + 库档案 + 昵称历史 */
-  applyProfile(secUid: string, nick: string, avatar: string | null, atMs = Date.now()) {
-    const r = this.agg.updateProfile(secUid, nick, avatar, atMs);
-    if (r.created || r.nickChanged) {
-      this.store.upsertProfile(secUid, nick, nick.includes('*'), avatar, atMs);
+  applyProfile(secUid: string, nick: string, avatar: string | null, starGuard = false, atMs = Date.now()) {
+    const r = this.agg.updateProfile(secUid, nick, avatar, starGuard, atMs);
+    if (r.created || r.nickChanged || r.guardChanged) {
+      this.store.upsertProfile(secUid, nick, nick.includes('*'), avatar, atMs, starGuard);
       this.refreshStoreInfoFor([secUid]);
     }
     return r;
@@ -115,6 +205,7 @@ export class Engine {
       // 空轮：直接结束开新轮（不发奖）
       this.store.settleRound(this.roundId, this.sessionId, [], { top1: null, settleType: 'empty' });
       this.agg.resetRound();
+      this.surge = null;
       this.startRound(this.roundIdx + 1);
       this.lastSettleAt = Date.now();
       return null;
@@ -156,7 +247,7 @@ export class Engine {
 
     const top = ranking.slice(0, 6).map(r => {
       const p = this.agg.profileOf(r.secUid);
-      return { rank: r.rank, secUid: r.secUid, nick: p ? (p.nickClean ?? p.nick) || '赞友' : '赞友', likes: r.likes };
+      return { rank: r.rank, secUid: r.secUid, nick: p ? (p.nickClean ?? p.nick) || '赞友' : '赞友', likes: r.likes, avatar: p?.avatar ?? null };
     });
     const ceremony: 'champion' | 'record' | 'normal' =
       recordBroken ? 'record' : (settleType === 'session-end' || settleType === 'manual') ? 'champion' : 'normal';
@@ -166,6 +257,7 @@ export class Engine {
     this.ev.onLog(`第 ${this.roundIdx} 轮结算（${settleType}）：冠军 ${top.find(t => t.rank === 1)?.nick ?? '-'} ${bestRoundLikes} 赞`);
 
     this.agg.settleRoundCounters();   // 收编本轮到 settledSession 再清零（累计展示防重复计算）
+    this.surge = null;                // 新轮开始，不把上一轮的冲刺态带进结算画面
     this.startRound(this.roundIdx + 1);
     this.lastSettleAt = Date.now();
     return result;
@@ -203,6 +295,7 @@ export class Engine {
         this.agg.setStoreInfo(uid, {
           totalLikes: row.total_likes, champion: row.champion, runner: row.runner,
           third: row.third, badge: row.badge,
+          starGuard: !!row.star_guard, gemColor: row.gem_color,
         });
         this.agg.markNotRookie(uid);
       }
@@ -254,10 +347,12 @@ export class Engine {
     if (this.checkpointTimer) clearInterval(this.checkpointTimer);
   }
 
-  /** 榜单快照（hub 1s 推送） */
-  snapshot(nowMs: number): BoardRow[] {
+  /** 榜单快照（hub 1s 推送）。topN 缺省取配置 boardCount；
+   *  控制台「展开完整排行」需要最多 100 人，由 index.ts 传 100 覆盖 */
+  snapshot(nowMs: number, topN?: number): BoardRow[] {
     const cfg = getConfig();
-    return this.agg.board(cfg.rankBasis, cfg.boardCount, nowMs, u => (u.nickClean ?? u.nick) || `赞友${u.secUid.slice(-4)}`);
+    return this.agg.board(cfg.rankBasis, topN ?? cfg.boardCount, nowMs,
+      u => (u.nickClean ?? u.nick) || `赞友${u.secUid.slice(-4)}`, cfg.surgeThreshold);
   }
 
   /** 纪录池（轮换框数据源；DB 部分带 15s 缓存，内存部分实时） */

@@ -29,7 +29,7 @@ async function wipe() {
   wiping.value = true;
   try {
     await post('/api/data/wipe', { confirm: 'DELETE' });
-    document.title = '数据已清空 · 点赞排行榜小助手';
+    document.title = '数据已清空 · 多功能点赞统计助手';
   } catch (e: any) { alert('清空失败：' + e.message); wiping.value = false; }
 }
 
@@ -43,7 +43,9 @@ async function save() {
     roundMinutes: Number(cfg.value.roundMinutes),
     rankBasis: cfg.value.rankBasis,
     boardCount: Number(cfg.value.boardCount),
+    captureTabs: Number(cfg.value.captureTabs) || 2,
     cappedThreshold: Number(cfg.value.cappedThreshold),
+    surgeThreshold: Number(cfg.value.surgeThreshold),
     autostartCapture: !!cfg.value.autostartCapture,
   });
   saved.value = true; setTimeout(() => (saved.value = false), 2500);
@@ -51,7 +53,12 @@ async function save() {
 
 const boardMsg = ref<string | null>(null);
 async function openBoard(mode: string) {
-  const u = { obs: '/board?transparent=1&layout=vertical', vertical: '/board?layout=vertical', normal: '/board' }[mode] ?? '/board';
+  const u = {
+    obs: '/board?transparent=1&layout=vertical',
+    vertical: '/board?layout=vertical',
+    normal: '/board',
+    chroma: '/board?transparent=1&layout=vertical',
+  }[mode] ?? '/board';
   if (mode === 'normal') {
     // 独立窗口：优先 Electron 透明桌面窗口
     try {
@@ -62,6 +69,15 @@ async function openBoard(mode: string) {
       boardMsg.value = '桌面窗口未安装，已用浏览器窗口代替';
     }
     setTimeout(() => (boardMsg.value = null), 5000);
+  } else if (mode === 'chroma') {
+    // 绿幕兜底窗口：只有个别采集端不识别 alpha 时使用；直播伴侣常规透明窗口可直接生效
+    try {
+      await post('/api/board-window', { mode: 'chroma' });
+      boardMsg.value = '✓ 绿幕兜底窗口已打开——常规透明窗口可直接用；仅在采集端不识别 alpha 时才需要它';
+    } catch (e: any) {
+      boardMsg.value = '桌面窗口未安装；请改用 OBS 浏览器源 /board?transparent=1（真透明）';
+    }
+    setTimeout(() => (boardMsg.value = null), 7000);
   } else {
     window.open(u, '_blank', 'width=560,height=960');
   }
@@ -88,12 +104,23 @@ async function openBoard(mode: string) {
           </select>
         </label>
         <label class="flex items-center justify-between gap-4">
-          <span>榜单显示条数</span>
-          <input v-model.number="cfg.boardCount" type="number" min="10" max="100" style="width: 130px" />
+          <span>窗口列表条数（不含前三）<span class="text-white/40 block text-[11px]">默认 10（不含前三）；窗口不够高时会被裁切，可拉高窗口或在采集端缩放；保存后 1 秒内热生效</span></span>
+          <input v-model.number="cfg.boardCount" type="number" min="3" max="100" style="width: 130px" />
+        </label>
+        <label class="flex items-center justify-between gap-4">
+          <span>捕获并发数（标签数）<span class="text-white/40 block text-[11px]">1~4 路；越多覆盖率略高，CPU/内存占用也更高（保存后自动重启捕获）</span></span>
+          <select v-model.number="cfg.captureTabs" style="width: 130px">
+            <option :value="1">1 路</option><option :value="2">2 路（默认）</option>
+            <option :value="3">3 路</option><option :value="4">4 路</option>
+          </select>
         </label>
         <label class="flex items-center justify-between gap-4">
           <span>限额推断阈值（赞/时）<span class="text-white/40 block text-[11px]">滚动 1h 达到该值后停滞 → 显示"⚖️封顶"（推断性标注）</span></span>
           <input v-model.number="cfg.cappedThreshold" type="number" min="500" max="3000" step="20" style="width: 130px" />
+        </label>
+        <label class="flex items-center justify-between gap-4">
+          <span>高能冲刺阈值（赞/分）<span class="text-white/40 block text-[11px]">最近 10 秒折算速度达到该值 → 鎏金流光 + 前三光环粒子（免费特效）</span></span>
+          <input v-model.number="cfg.surgeThreshold" type="number" min="50" max="3000" step="50" style="width: 130px" />
         </label>
         <label class="flex items-center justify-between gap-4">
           <span>core 启动时自动拉起捕获窗口</span>
@@ -115,16 +142,30 @@ async function openBoard(mode: string) {
     <section class="glass rounded-2xl p-5">
       <h2 class="font-bold text-[14px] mb-3">🪟 榜单窗口</h2>
       <p class="text-[12.5px] text-white/55 leading-6 mb-3">
-        榜单窗口三种用法：<br />
+        榜单窗口用法：<br />
         1. <b class="text-white/80">桌面透明窗口（推荐）</b>：无边框 + 背景透明通道 + 置顶 + 可鼠标穿透的
         Windows 独立窗口（顶部细条可拖动，📌置顶 / 🖱穿透 / ✕关闭；穿透后按 Ctrl+Alt+B 解锁）；
         也可双击项目里的「打开榜单窗口.bat」；<br />
         2. <b class="text-white/80">OBS 采集</b>：来源 → 浏览器，URL 填
         <code class="px-1 rounded bg-white/10 text-amber-200">http://127.0.0.1:17730/board?transparent=1</code>（推荐 560×960）；<br />
-        3. <b class="text-white/80">浏览器窗口</b>：普通页面，无透明通道。
+        3. <b class="text-white/80">浏览器窗口</b>：普通页面，无透明通道；<br />
+        4. <b class="text-white/80">OBS 窗口采集</b>：实测 OBS「窗口采集」选中
+        <b class="text-white/80">“多功能点赞统计助手”</b> 即可直接获得带透明通道的画面（无需绿幕）；<br />
+        5. <b class="text-white/80">抖音直播伴侣窗口捕获</b>：直播伴侣高级功能里的
+        <b class="text-amber-200">「绿幕抠图」实际消费的是窗口的透明通道</b>，
+        <b class="text-white/80">不需要真的绿色背景</b>；常规透明窗口就能生效。
+        操作：直播伴侣 → 添加素材 → <b class="text-white/80">窗口捕获</b> → 选择
+        <b class="text-white/80">“多功能点赞统计助手”</b>；如需开启
+        <b class="text-white/80">高级功能 → 绿幕抠图</b>，
+        <b class="text-amber-200">相似度调到最低</b>即可（避免误伤正常显示区域）。
+        “OBS 兼容窗口（绿幕）”只作为个别采集端不识别 alpha 时的兜底。<br />
+        另一条真 alpha 路径：OBS 浏览器源填
+        <code class="px-1 rounded bg-white/10 text-amber-200">http://127.0.0.1:17730/board?transparent=1</code>
+        → OBS 虚拟摄像头 → 直播伴侣「摄像头」源。
       </p>
       <div class="flex gap-2 flex-wrap items-center">
         <button class="btn btn-primary" @click="openBoard('normal')">开桌面透明窗口</button>
+        <button class="btn" @click="openBoard('chroma')">OBS 兼容窗口（绿幕）</button>
         <button class="btn" @click="openBoard('vertical')">竖屏版</button>
         <button class="btn" @click="openBoard('obs')">OBS 透明版</button>
         <Transition name="banner"><span v-if="boardMsg" class="text-[12px] text-emerald-300">{{ boardMsg }}</span></Transition>
@@ -147,7 +188,7 @@ async function openBoard(mode: string) {
         <div class="flex justify-between"><span class="text-white/45">场次</span><span class="num">{{ stats.sessions }}</span></div>
       </div>
       <a href="/api/export" class="btn inline-block" download>⬇ 导出全量 JSON</a>
-      <p class="text-[11.5px] text-white/40 mt-3">数据存于 data/likeboard.db（SQLite）。只存聚合与结算结果，不存原始事件流，体量长期可控。</p>
+      <p class="text-[11.5px] text-white/40 mt-3">数据存于 data/likes-stats.db（SQLite）。只存聚合与结算结果，不存原始事件流，体量长期可控。</p>
     </section>
 
     <section class="glass rounded-2xl p-5">
@@ -163,7 +204,7 @@ async function openBoard(mode: string) {
     <section class="glass rounded-2xl p-5" style="border-color: rgba(244, 63, 94, 0.3)">
       <h2 class="font-bold text-[14px] mb-3 text-rose-300">⚠️ 危险区</h2>
       <p class="text-[12.5px] text-white/55 leading-6 mb-3">
-        清空全部数据：删除排行榜数据库、用户档案、昵称历史、头像缓存与全部纪录（<b class="text-white/80">登录态保留</b>，无需重新扫码）。
+        清空全部数据：删除排行榜数据库、用户档案、昵称历史、头像缓存与全部纪录（<b class="text-white/80">登录态与设置保留</b>，无需重新扫码/重配）。
         清空后服务自动退出，需重新运行「一键启动.bat」。此操作<b class="text-rose-300">不可撤销</b>——建议先在上方导出备份。
       </p>
       <div class="flex gap-2 items-center flex-wrap">

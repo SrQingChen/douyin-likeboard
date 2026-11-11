@@ -9,6 +9,9 @@ export interface BoardSnapshot {
   };
   round: { idx: number; startedAt: number; endsAt: number | null; basis: 'round' | 'session' };
   capture: string;
+  boardCount: number;
+  surgeThreshold: number;
+  surge: unknown | null;
   podium: unknown[]; list: unknown[];
   stats: { likers: number; global: Record<string, number> };
   records: Record<string, unknown>;
@@ -35,6 +38,8 @@ export class Hub {
   }
 
   log(line: string) {
+    // 统一落盘：capture 子进程/API 的日志也必须进 core.log，排障时不只依赖 UI 面板
+    console.log(line);
     this.broadcast({ t: 'log', line, at: Date.now() });
   }
 

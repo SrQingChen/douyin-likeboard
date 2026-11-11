@@ -11,6 +11,7 @@ export interface UserRow {
   champion: number; runner: number; third: number;
   best_speed: number; streak: number; sessions_seen: number; rounds_seen: number;
   badge: string | null;
+  star_guard: number; gem_color: string | null;
 }
 export interface RoundRow {
   id: number; session_id: number; idx: number; started_at: number; ended_at: number | null;
@@ -47,7 +48,9 @@ export class Store {
         streak INTEGER NOT NULL DEFAULT 0,
         sessions_seen INTEGER NOT NULL DEFAULT 0,
         rounds_seen INTEGER NOT NULL DEFAULT 0,
-        badge TEXT
+        badge TEXT,
+        star_guard INTEGER NOT NULL DEFAULT 0,
+        gem_color TEXT
       );
       CREATE TABLE IF NOT EXISTS nicknames (
         sec_uid TEXT NOT NULL,
@@ -88,6 +91,10 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_round_session ON rounds(session_id);
       CREATE INDEX IF NOT EXISTS idx_nick_user ON nicknames(sec_uid);
     `);
+    // 增量列（旧库升级）：星守护状态 + 手动宝石配色（null=跟随默认/随机）
+    const cols = (this.db.prepare(`PRAGMA table_info(users)`).all() as { name: string }[]).map(c => c.name);
+    if (!cols.includes('star_guard')) this.db.exec(`ALTER TABLE users ADD COLUMN star_guard INTEGER NOT NULL DEFAULT 0`);
+    if (!cols.includes('gem_color')) this.db.exec(`ALTER TABLE users ADD COLUMN gem_color TEXT`);
   }
 
   /** 启动恢复：上次异常退出留下的开放 session/round 标记为 interrupted（不发奖，诚实原则）。
@@ -117,17 +124,19 @@ export class Store {
   }
 
   // ── 用户档案 ──
-  upsertProfile(secUid: string, nick: string, masked: boolean, avatar: string | null, at: number) {
+  upsertProfile(secUid: string, nick: string, masked: boolean, avatar: string | null, at: number, starGuard = false) {
     const cur = this.db.prepare(`SELECT nick, nick_clean, avatar FROM users WHERE sec_uid=?`).get(secUid) as
       { nick: string; nick_clean: string | null; avatar: string | null } | undefined;
+    const sg = starGuard ? 1 : 0;
     if (!cur) {
       this.db.prepare(`
-        INSERT INTO users (sec_uid, nick, nick_clean, avatar, first_seen, last_seen)
-        VALUES (?,?,?,?,?,?)`).run(secUid, nick, masked ? null : nick, avatar, at, at);
+        INSERT INTO users (sec_uid, nick, nick_clean, avatar, first_seen, last_seen, star_guard)
+        VALUES (?,?,?,?,?,?,?)`).run(secUid, nick, masked ? null : nick, avatar, at, at, sg);
     } else {
       const clean = masked ? cur.nick_clean : nick;
-      this.db.prepare(`UPDATE users SET nick=?, nick_clean=COALESCE(?, nick_clean), avatar=COALESCE(?, avatar), last_seen=? WHERE sec_uid=?`)
-        .run(nick, clean, avatar, at, secUid);
+      this.db.prepare(`UPDATE users SET nick=?, nick_clean=COALESCE(?, nick_clean), avatar=COALESCE(?, avatar),
+        last_seen=?, star_guard=MAX(star_guard, ?) WHERE sec_uid=?`)
+        .run(nick, clean, avatar, at, sg, secUid);
     }
     // 昵称历史（含本次昵称的 last_at/hits 更新）
     this.db.prepare(`
@@ -138,6 +147,11 @@ export class Store {
 
   getUser(secUid: string): UserRow | undefined {
     return this.db.prepare(`SELECT * FROM users WHERE sec_uid=?`).get(secUid) as UserRow | undefined;
+  }
+
+  /** 手动宝石配色：null=跟随默认（星守每场随机），'rainbow'=彩虹流光 */
+  setGemColor(secUid: string, color: string | null) {
+    this.db.prepare(`UPDATE users SET gem_color=? WHERE sec_uid=?`).run(color, secUid);
   }
   getUsers(secUids: string[]): (UserRow | undefined)[] {
     const st = this.db.prepare(`SELECT * FROM users WHERE sec_uid=?`);
@@ -299,6 +313,30 @@ export class Store {
     const r = (this.db.prepare(`SELECT COUNT(*) c FROM rounds WHERE ended_at IS NOT NULL`).get() as any).c;
     const s = (this.db.prepare(`SELECT COUNT(*) c FROM sessions WHERE ended_at > 0`).get() as any).c;
     return { users: u.c, totalLikes: u.s, rounds: r, sessions: s };
+  }
+
+  /** 清空用户库（用户/昵称/场次/轮次/明细/纪录）；保留设置、登录态与程序文件。
+   *  只清用户数据，不删 config.json / runtime-token / chrome-profile。 */
+  wipeUsers(): { users: number; nicknames: number; sessions: number; rounds: number } {
+    const count = (t: string) => (this.db.prepare(`SELECT COUNT(*) c FROM ${t}`).get() as any).c as number;
+    const counts = {
+      users: count('users'), nicknames: count('nicknames'),
+      sessions: count('sessions'), rounds: count('rounds'),
+    };
+    const tx = this.db.transaction(() => {
+      this.db.exec(`
+        DELETE FROM round_users;
+        DELETE FROM rounds;
+        DELETE FROM sessions;
+        DELETE FROM nicknames;
+        DELETE FROM users;
+        DELETE FROM kv;
+        DELETE FROM sqlite_sequence WHERE name IN ('sessions','rounds');
+      `);
+    });
+    tx();
+    try { this.db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
+    return counts;
   }
 
   exportAll(): unknown {

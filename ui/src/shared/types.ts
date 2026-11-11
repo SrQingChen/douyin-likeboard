@@ -2,6 +2,17 @@ export interface BoardRow {
   secUid: string; nick: string; avatar: string | null; badge: string | null;
   likes: number; speed: number; capped: boolean; rank: number;
   storeTotalLikes: number; storeChampion: number; storeRunner: number; storeThird: number;
+  surge: boolean;
+  starGuard: boolean;
+  gemColor: string | null;
+}
+export interface SpeedSurge {
+  id: number; secUid: string; nick: string; avatar?: string | null;
+  speed: number; threshold: number;
+  startedAt: number; endsAt: number;
+}
+export interface ChatEvent {
+  id: number; secUid: string; nick: string; avatar?: string | null; text: string; at: number;
 }
 export interface Snapshot {
   t: 'board'; at: number;
@@ -11,6 +22,9 @@ export interface Snapshot {
   };
   round: { idx: number; startedAt: number; endsAt: number | null; basis: 'round' | 'session' };
   capture: string;
+  boardCount: number;
+  surgeThreshold: number;
+  surge?: SpeedSurge | null;
   podium: BoardRow[]; list: BoardRow[];
   stats: { likers: number; global: Record<string, number> };
   records: {
@@ -24,7 +38,7 @@ export interface Snapshot {
 }
 export interface SettleToast {
   roundIdx: number;
-  top: { rank: number; secUid: string; nick: string; likes: number }[];
+  top: { rank: number; secUid: string; nick: string; likes: number; avatar?: string | null }[];
   ceremony: 'champion' | 'record' | 'normal';
   recordBroken: string | null;
   settleType: string;

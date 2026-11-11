@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onScopeDispose, watch } from 'vue';
+import type { SpeedSurge } from '../shared/types';
 import { roState, connectWs, clearMilestone } from '../shared/store';
-import { useCountUp, fmtNum, fmtTime } from '../shared/format';
+import { useCountUp, fmtNum, fmtTime, isAuthor } from '../shared/format';
+import { APP_VERSION } from '../shared/version';
 import RotatingBox from './RotatingBox.vue';
 import Podium from './Podium.vue';
 import RankList from './RankList.vue';
@@ -11,8 +13,17 @@ import Confetti from './Confetti.vue';
 const qs = new URLSearchParams(location.search);
 const transparent = qs.get('transparent') === '1';
 const vertical = qs.get('layout') === 'vertical';
-const maxRows = Number(qs.get('max') ?? 50);
+const wide = qs.get('layout') === 'wide';
+const chroma = qs.get('chroma') === '1';
+// 展示条数：?max= 显式指定（控制台展开预览用 100），否则跟随设置里的 boardCount
+const maxRows = computed(() => {
+  const raw = qs.get('max');
+  const n = Number(raw);
+  if (raw && Number.isFinite(n) && n > 0) return n;
+  return roState.snap?.boardCount ?? 50;
+});
 if (transparent) document.body.classList.add('transparent-mode');
+if (chroma) document.body.classList.add('chroma-mode');
 
 // ── 桌面透明窗口（Electron）控件 ──
 const eb = (window as unknown as { electronBoard?: {
@@ -41,13 +52,39 @@ const roundSecsLeft = computed(() => {
 const sessionLikes = computed(() => snap.value?.room.sessionLikes ?? 0);
 const sessionDisplay = useCountUp(sessionLikes);
 
+// ── 高能冲刺状态（快照为权威源；1s 时钟驱动倒计时）──
+const surgeWave = computed<SpeedSurge | null>(() => {
+  const g = roState.surge; void nowTick.value;
+  return g && Date.now() < g.endsAt ? g : null;
+});
+const surgeRemain = computed(() => surgeWave.value
+  ? Math.max(0, Math.ceil((surgeWave.value.endsAt - nowTick.value) / 1000)) : 0);
+const surgeThreshold = computed(() => snap.value?.surgeThreshold ?? 300);
+const roundMinutes = computed(() => {
+  const r = snap.value?.round;
+  if (!r?.endsAt) return null;
+  return Math.max(1, Math.round((r.endsAt - r.startedAt) / 60_000));
+});
+
 // ── 结算横幅 + 彩带分级 ──
 const confetti = ref<InstanceType<typeof Confetti> | null>(null);
 const showBanner = ref(false);
+// 结算瞬间关闭列表 FLIP：整榜重置时逐行飞太乱，定格后直接切到新轮
+const settling = ref(false);
+let confettiTimer = 0;
+let settleTimer = 0;
 watch(() => roState.settleBanner?.id, (id) => {
   if (!id) return;
   const d = roState.settleBanner!.data;
-  if (d.ceremony === 'record' || d.ceremony === 'champion') confetti.value?.burst();
+  settling.value = true;
+  clearTimeout(settleTimer);
+  settleTimer = window.setTimeout(() => (settling.value = false), 2200);
+  if (d.ceremony === 'record' || d.ceremony === 'champion') {
+    confetti.value?.burst();
+    // 1.6s 后再补一发，让彩带覆盖整个结算镜头
+    clearTimeout(confettiTimer);
+    confettiTimer = window.setTimeout(() => confetti.value?.burst(), 1600);
+  }
   showBanner.value = true;
   setTimeout(() => (showBanner.value = false), 9000);
 });
@@ -56,10 +93,11 @@ watch(() => roState.milestone?.id, () => {
 });
 
 onMounted(() => connectWs());
-onScopeDispose(() => clearInterval(clock));
+onScopeDispose(() => { clearInterval(clock); clearTimeout(confettiTimer); clearTimeout(settleTimer); });
 
+const coverage = computed(() => Math.round(snap.value?.room.coverage ?? 100));
 const coverageWarn = computed(() => {
-  const c = snap.value?.room.coverage ?? 100;
+  const c = coverage.value;
   return c < 99 ? c : null;
 });
 const captureDown = computed(() => ['disconnected', 'offline', 'failed'].includes(snap.value?.capture ?? 'disconnected'));
@@ -87,7 +125,8 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
       已鼠标穿透 · 按 Ctrl+Alt+B 解锁
     </div>
 
-    <div class="relative z-10 flex flex-col h-full px-3.5 pt-3 gap-2.5" :class="vertical ? 'text-[15px]' : ''">
+    <div class="relative z-10 flex flex-col h-full px-3.5 pt-3 gap-2.5"
+      :class="[vertical ? 'text-[15px]' : '', wide ? 'max-w-[1560px] w-full mx-auto px-6 pt-4 gap-3' : '']">
 
       <!-- 顶行：轮换框 + 标头 -->
       <div class="flex items-center gap-3">
@@ -96,11 +135,12 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
           <div class="glass rounded-2xl px-4 py-2.5 flex items-center justify-between gap-2">
             <div class="min-w-0">
               <div class="flex items-center gap-2">
-                <span class="text-[15px] font-bold truncate">{{ snap?.room.anchor || '点赞排行榜' }}</span>
+                <span class="text-[10px] px-1.5 py-px rounded bg-amber-400/15 text-amber-200 border border-amber-300/30 font-bold shrink-0">点赞统计</span>
+                <span class="text-[15px] font-bold truncate">{{ snap?.room.anchor || '多功能点赞统计助手' }}</span>
                 <span class="text-[10px] px-1.5 py-px rounded bg-white/10 text-white/60 shrink-0">{{ snap?.round.basis === 'session' ? '本场榜' : `第 ${snap?.round.idx ?? 1} 轮` }}</span>
               </div>
               <div class="text-[11px] text-white/50 mt-0.5">
-                房间 {{ snap?.room.webRid || '—' }} · <span class="num-go">{{ fmtNum(snap?.room.online ?? 0) }}</span> 在线
+                房间 {{ snap?.room.webRid || '—' }} · <span class="num-go">{{ snap?.room.online ? fmtNum(snap.room.online) : '—' }}</span> 在线
                 <span v-if="roundSecsLeft >= 0" class="ml-1.5 text-amber-200/80">· ⏱ {{ fmtTime(roundSecsLeft * 1000) }} 后结算</span>
               </div>
             </div>
@@ -113,7 +153,10 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
               </div>
               <div class="text-[11px] text-white/45">
                 💨 {{ fmtNum(snap?.room.ratePerMin ?? 0) }}/分
-                <span v-if="coverageWarn != null" class="ml-1 text-amber-300" :title="`捕获完整度 ${coverageWarn}%（断连缺口，不虚补）`">⚠ {{ coverageWarn }}%</span>
+                <span class="ml-1" :class="coverageWarn != null ? 'text-amber-300' : 'text-white/35'"
+                  :title="`全局捕获完整度 ${coverage}%（抽样下发，缺口如实展示不虚补）`">
+                  · 完整度 {{ coverage }}%<template v-if="coverageWarn != null"> ⚠</template>
+                </span>
               </div>
             </div>
           </div>
@@ -124,15 +167,115 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
         </div>
       </div>
 
-      <!-- 领奖台 -->
-      <Podium :rows="snap?.podium ?? []" />
+      <!-- ── 16:9 宽屏布局（demo / PC 直播伴侣）── -->
+      <template v-if="wide">
+        <div class="flex-1 min-h-0 flex gap-4">
+          <!-- 左：领奖台 + 本场速览 + 玩法说明 -->
+          <div class="w-[640px] shrink-0 flex flex-col gap-3 min-h-0">
+            <Podium big :rows="snap?.podium ?? []" :surge="surgeWave" />
 
-      <!-- 榜单列表 -->
-      <div class="flex-1 min-h-0 overflow-hidden relative">
-        <RankList :rows="snap?.list ?? []" :max="maxRows" />
-        <div class="pointer-events-none absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-[#070b18] to-transparent" v-if="!transparent" />
-      </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div class="glass rounded-xl px-3 py-2">
+                <div class="text-[10px] text-white/45">本场点赞</div>
+                <div class="num-go text-[19px] font-black text-rose-200">{{ fmtNum(Math.round(sessionDisplay)) }}</div>
+              </div>
+              <div class="glass rounded-xl px-3 py-2">
+                <div class="text-[10px] text-white/45">参与赞友</div>
+                <div class="num-go text-[19px] font-black text-sky-200">{{ fmtNum(snap?.stats.likers ?? 0) }}</div>
+              </div>
+              <div class="glass rounded-xl px-3 py-2">
+                <div class="text-[10px] text-white/45">全场速率</div>
+                <div class="num-go text-[19px] font-black text-amber-200">{{ fmtNum(snap?.room.ratePerMin ?? 0) }}<span class="text-[11px] font-semibold opacity-70">/分</span></div>
+              </div>
+            </div>
+
+            <div class="glass rounded-2xl p-4 flex-1 min-h-0 flex flex-col justify-start gap-3.5">
+              <div class="flex items-center justify-between">
+                <span class="text-[14px] font-bold text-amber-200 tracking-wide">功能说明</span>
+                <span class="text-[10px] text-white/40">多功能点赞统计助手 · 纯点赞维度</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="rule-icon">❤️</span>
+                <div><div class="text-[13.5px] font-semibold">点赞即参与</div>
+                  <div class="text-[11.5px] text-white/50">纯点赞参与，完全免费</div></div>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="rule-icon">🏆</span>
+                <div><div class="text-[13.5px] font-semibold">{{ roundMinutes ? `每 ${roundMinutes} 分钟结算 · 前三登台` : '实时结算 · 前三登台' }}</div>
+                  <div class="text-[11.5px] text-white/50">冠军皇冠 + 冠亚季军领奖台</div></div>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="rule-icon">⚡</span>
+                <div><div class="text-[13.5px] font-semibold">高能冲刺 · 近 10 秒 ≥{{ fmtNum(surgeThreshold) }} 赞/分</div>
+                  <div class="text-[11.5px] text-white/50">冲榜用户鎏金流光 + 前三金色光环粒子</div></div>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="rule-icon">💬</span>
+                <div><div class="text-[13.5px] font-semibold">评论「加入」</div>
+                  <div class="text-[11.5px] text-white/50">全场欢迎播报</div></div>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="rule-icon">👑</span>
+                <div><div class="text-[13.5px] font-semibold">纪录与徽章</div>
+                  <div class="text-[11.5px] text-white/50">N 冠王 · 连霸纪录 · 单轮纪录轮换展示</div></div>
+              </div>
+              <div class="mt-auto pt-3 border-t border-white/10 text-[11px] text-white/45">
+                ⚖️ 公平性：榜单只按点赞数排名，无任何付费加成
+              </div>
+            </div>
+          </div>
+
+          <!-- 右：实时榜单 -->
+          <div class="flex-1 min-w-0 min-h-0 flex flex-col">
+            <div class="flex items-center justify-between px-1 mb-1.5">
+              <div class="flex items-baseline gap-2">
+                <span class="text-[14px] font-bold">实时榜单</span>
+                <span class="text-[11px] text-white/40">TOP {{ maxRows }} · 每秒刷新</span>
+              </div>
+              <div class="text-[11px] text-white/45">参与 <span class="text-white/80">{{ fmtNum(snap?.stats.likers ?? 0) }}</span> 人</div>
+            </div>
+            <div class="flex-1 min-h-0 overflow-hidden relative">
+              <RankList :rows="snap?.list ?? []" :max="maxRows" :settling="settling" />
+              <div class="pointer-events-none absolute bottom-0 left-0 right-0 h-14 bg-gradient-to-t from-[#070b18] to-transparent" v-if="!transparent" />
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ── 竖屏/默认布局（直播叠加）── -->
+      <template v-else>
+        <!-- 领奖台 -->
+        <Podium :rows="snap?.podium ?? []" :surge="surgeWave" />
+
+        <!-- 榜单列表 -->
+        <div class="flex-1 min-h-0 overflow-hidden relative">
+          <RankList :rows="snap?.list ?? []" :max="maxRows" :settling="settling" />
+          <div class="pointer-events-none absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-[#070b18] to-transparent" v-if="!transparent" />
+        </div>
+      </template>
     </div>
+
+    <!-- 高能冲刺鎏金横幅（4s 续期） -->
+    <Transition name="surge">
+      <div v-if="surgeWave" class="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 glass rounded-2xl px-5 py-2.5 flex items-center gap-3"
+        style="border-color: rgba(255, 215, 106, 0.45)">
+        <span class="text-[26px] surge-mark">⚡</span>
+        <div>
+          <div class="text-[13.5px] font-bold text-amber-200" :class="{ 'author-rainbow': isAuthor(surgeWave.secUid) }">{{ surgeWave.nick }} 高能冲刺中</div>
+          <div class="text-[11px] text-amber-100/70">近 10 秒 {{ fmtNum(surgeWave.speed) }} 赞/分 · 鎏金流光 {{ surgeRemain }}s</div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 评论「加入」播报（3.5s） -->
+    <Transition name="chat">
+      <div v-if="roState.chat" class="absolute left-1/2 -translate-x-1/2 z-50 glass rounded-xl px-4 py-2 flex items-center gap-2"
+        :class="wide ? 'top-[142px]' : 'bottom-16'"
+        style="border-color: rgba(125, 211, 252, 0.32)">
+        <span class="text-[16px]">💬</span>
+        <span class="text-[13px] text-white/85"><b class="text-sky-200" :class="{ 'author-rainbow': isAuthor(roState.chat.secUid) }">{{ roState.chat.nick }}</b> 评论「加入」 · 欢迎来到直播间</span>
+      </div>
+    </Transition>
 
     <!-- 结算横幅 -->
     <Transition name="banner">
@@ -146,7 +289,8 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
           </div>
           <div class="text-[12px] text-white/70 mt-0.5">
             <template v-for="(t, i) in roState.settleBanner.data.top.filter(x => x.rank <= 3)" :key="t.secUid">
-              <span :class="t.rank === 1 ? 'text-amber-300 font-bold' : ''">{{ ['🥇', '🥈', '🥉'][t.rank - 1] }} {{ t.nick }} {{ fmtNum(t.likes) }}</span>
+              <span :class="t.rank === 1 ? 'text-amber-300 font-bold' : ''">{{ ['🥇', '🥈', '🥉'][t.rank - 1] }}
+                <span :class="{ 'author-rainbow': isAuthor(t.secUid) }">{{ t.nick }}</span> {{ fmtNum(t.likes) }}</span>
               <span v-if="i < 2" class="mx-1 text-white/30">|</span>
             </template>
           </div>
@@ -168,7 +312,7 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
 
     <!-- 水印（低调，主播可忽略；观众侧不显眼） -->
     <div class="absolute bottom-0.5 right-2 text-[10px] text-white/25 select-none pointer-events-none z-30 tracking-wide">
-      LikeBoard v0.1.1
+      多功能点赞统计助手 v{{ APP_VERSION }}
     </div>
 
     <Confetti ref="confetti" />

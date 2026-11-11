@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  LikeBoard root launcher  (ASCII content + CRLF only!)
+rem  Like stats assistant root launcher  (ASCII content + CRLF only!)
 rem  1st choice: Electron setup splash (progress UI + foolproof)
 rem  fallback  : headless start via portable/system Node.js
 rem  Never put non-ASCII literals in a .bat body: cmd decodes the
@@ -33,7 +33,7 @@ if %errorlevel%==0 (
 )
 echo Starting core ...
 cd /d "%ROOT%server"
-start "likeboard-core" /min cmd /c ""%NODE_CMD%" --import tsx src/index.ts >> "..\data\core.log" 2>&1"
+start "likes-stats-core" /min cmd /c ""%NODE_CMD%" --import tsx src/index.ts >> "..\data\core.log" 2>&1"
 set /a tries=0
 :wait_ready
 ping -n 3 127.0.0.1 >nul

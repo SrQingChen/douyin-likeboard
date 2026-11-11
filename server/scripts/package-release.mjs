@@ -1,6 +1,6 @@
-// ─── Release 打包：LikeBoard v0.1.0 便携包（零部署，空白机可用）───
+// ─── Release 打包：多功能点赞统计助手 便携包（零部署，空白机可用）───
 // 用法：node --import tsx scripts/package-release.mjs
-// 产出：release/LikeBoard-<ver>-win64-portable.zip + VERSION.json
+// 产出：release/LikesStatsAssistant-<ver>-win64-portable.zip + VERSION.json
 //
 // 依赖清单（完整管线）：
 //   runtime/node.exe            便携 Node 运行时
@@ -19,8 +19,8 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..', '..');
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.version.json'), 'utf-8')).version;
-const NAME = `LikeBoard-${VERSION}-win64-portable`;
-const STAGE = path.join(ROOT, 'release', `LikeBoard-${VERSION}`);
+const NAME = `LikesStatsAssistant-${VERSION}-win64-portable`;
+const STAGE = path.join(ROOT, 'release', `LikesStatsAssistant-${VERSION}`);
 const ZIP = path.join(ROOT, 'release', `${NAME}.zip`);
 
 const robocopy = (src, dest, opts = '') => {
@@ -31,7 +31,7 @@ const robocopy = (src, dest, opts = '') => {
 };
 const copyFile = (src, dest) => { fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.copyFileSync(src, dest); };
 
-console.log(`═══ LikeBoard v${VERSION} 打包 ═══`);
+console.log(`═══ 多功能点赞统计助手 v${VERSION} 打包 ═══`);
 if (fs.existsSync(STAGE)) fs.rmSync(STAGE, { recursive: true, force: true });
 fs.mkdirSync(STAGE, { recursive: true });
 
@@ -69,16 +69,18 @@ copyFile(path.join(ROOT, 'README.md'), path.join(STAGE, 'README.md'));
 copyFile(path.join(ROOT, 'LICENSE'), path.join(STAGE, 'LICENSE'));
 // 双名：中文给资源管理器体验，ASCII 名防个别解压工具的编码问题（内容相同）
 copyFile(path.join(ROOT, '一键启动.bat'), path.join(STAGE, '一键启动.bat'));
-copyFile(path.join(ROOT, '一键启动.bat'), path.join(STAGE, 'Start-LikeBoard.bat'));
+copyFile(path.join(ROOT, '一键启动.bat'), path.join(STAGE, 'Start-Assistant.bat'));
 copyFile(path.join(ROOT, '打开榜单窗口.bat'), path.join(STAGE, '打开榜单窗口.bat'));
 copyFile(path.join(ROOT, '打开榜单窗口.bat'), path.join(STAGE, 'Open-Board-Window.bat'));
+copyFile(path.join(ROOT, '打开榜单窗口-OBS兼容.bat'), path.join(STAGE, '打开榜单窗口-OBS兼容.bat'));
+copyFile(path.join(ROOT, '打开榜单窗口-OBS兼容.bat'), path.join(STAGE, 'Open-Board-OBS.bat'));
 
 // 7. VERSION.json（水印与出处标记）
 console.log('[7/8] VERSION.json（构建水印）');
 let commit = 'unknown';
 try { commit = execSync('git rev-parse --short HEAD', { cwd: ROOT }).toString().trim(); } catch {}
 const versionStamp = {
-  name: 'LikeBoard 抖音点赞排行榜小助手',
+  name: '多功能点赞统计助手',
   version: VERSION,
   author: 'SrQingChen',
   license: 'GPL-3.0-or-later',
@@ -98,7 +100,7 @@ const must = [
   ['server/node_modules/better-sqlite3/build/Release/better_sqlite3.node'],
   ['ui/dist/board.html'], ['ui/dist/index.html'],
   ['browsers/chromium-1248/chrome-win64/chrome.exe'],
-  ['一键启动.bat'], ['Start-LikeBoard.bat'], ['Open-Board-Window.bat'],
+  ['一键启动.bat'], ['Start-Assistant.bat'], ['Open-Board-Window.bat'], ['Open-Board-OBS.bat'],
   ['LICENSE'], ['VERSION.json'], ['README.md'],
 ];
 const missing = must.filter(([p]) => !fs.existsSync(path.join(STAGE, p)));

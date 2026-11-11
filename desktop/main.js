@@ -16,11 +16,26 @@ const H = Math.max(420, Number(getArg('height', 960)) || 960);
 const BASE = getArg('url', 'http://127.0.0.1:17730');
 const SELFTEST = args.includes('--selftest');
 const SETUP = args.includes('--setup');
-const VERSION = '0.1.1';
+// OBS/直播伴侣兼容模式：普通不透明窗口 + 纯绿背景，由采集端 Chroma Key 抠掉。
+// 透明 Electron 窗口在 Windows 上带 WS_EX_NOREDIRECTIONBITMAP（DirectComposition），
+// OBS/直播伴侣的窗口枚举通常直接跳过，列表里看不到；该模式可被正常枚举/捕获。
+const CHROMA = args.includes('--chroma');
+const WINDOW_TITLE = CHROMA ? '多功能点赞统计助手（OBS兼容）' : '多功能点赞统计助手';
+const VERSION = '0.2.0';
 const AUTHOR = 'SrQingChen';
 // 项目根：electron.exe desktop 启动时 appPath = desktop → 上级即根
 const ROOT = path.dirname(app.getAppPath ? app.getAppPath() : __dirname);
 if (SETUP) { try { process.chdir(ROOT); } catch {} }
+if (CHROMA) {
+  // 去掉 DirectComposition，窗口变成普通可捕获窗口（代价：不能用逐像素透明，
+  // 所以用纯绿背景 + 采集端 Chroma Key）。
+  app.commandLine.appendSwitch('disable-direct-composition');
+}
+
+// 榜单窗口保持单实例；--setup 启动器与 --chroma 兼容窗口必须能与已开窗口共存。
+if (!SETUP && !CHROMA && !app.requestSingleInstanceLock()) { app.quit(); }
+let win = null;
+let through = false;
 
 function probeCore(cb, timeoutMs = 1500) {
   const req = http.get(`${BASE}/api/status`, { timeout: timeoutMs }, res => {
@@ -31,22 +46,11 @@ function probeCore(cb, timeoutMs = 1500) {
   req.on('timeout', () => { req.destroy(); cb(false); });
 }
 
-if (!app.requestSingleInstanceLock()) { app.quit(); }
-let win = null;
-let through = false;
-
-function probeCore(cb, retries = 0) {
-  const req = http.get(`${BASE}/api/status`, { timeout: 1500 }, res => {
-    res.resume();
-    cb(res.statusCode === 200);
-  });
-  req.on('error', () => cb(false));
-  req.on('timeout', () => { req.destroy(); cb(false); });
-  req.__retries = retries;
-}
-
 function loadBoardWithRetry() {
-  win.loadURL(`${BASE}/board?transparent=1&frameless=1`)
+  const q = CHROMA
+    ? '?transparent=1&frameless=1&chroma=1&layout=vertical'
+    : '?transparent=1&frameless=1';
+  win.loadURL(`${BASE}/board${q}`)
     .then(() => { if (SELFTEST) setTimeout(runSelftest, 3000); })
     .catch(() => {
       // core 半路挂掉：回等待页并重试
@@ -69,18 +73,29 @@ async function runSelftest() {
 }
 
 function createWindow() {
+  console.log(`[board] mode=${CHROMA ? 'chroma' : 'transparent'} title=${WINDOW_TITLE}`);
   win = new BrowserWindow({
     width: W, height: H,
     minWidth: 300, minHeight: 420,
-    frame: false, transparent: true,
-    backgroundColor: '#00000000',
+    frame: false,
+    // 透明窗口：逐像素透明（OBS 浏览器源/支持 WGC 的采集端可用）
+    // 兼容窗口：普通不透明窗口 + 纯绿背景（OBS/直播伴侣窗口捕获 + Chroma Key）
+    transparent: !CHROMA,
+    backgroundColor: CHROMA ? '#00FF00' : '#00000000',
     hasShadow: false,
     alwaysOnTop: false,          // 默认不置顶（用户要求），📌按钮可开
     show: false,
+    skipTaskbar: false,
+    title: WINDOW_TITLE,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, nodeIntegration: false,
     },
+  });
+  // 页面 title 不覆盖窗口 title，保证 OBS/直播伴侣列表里能按名称找到
+  win.on('page-title-updated', (e) => {
+    e.preventDefault();
+    if (win && !win.isDestroyed()) win.setTitle(WINDOW_TITLE);
   });
   win.once('ready-to-show', () => { if (!SELFTEST) win.show(); });
 
@@ -147,6 +162,9 @@ function runSetup() {
   });
   win.once('ready-to-show', () => win.show());
   win.loadFile('setup.html');
+  win.webContents.on('did-finish-load', () => {
+    win.webContents.executeJavaScript(`document.getElementById('ver') && (document.getElementById('ver').textContent = 'v${VERSION}')`).catch(() => {});
+  });
   const step = (id, status, detail) => win.webContents.send('setup-step', { id, status, detail });
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -174,7 +192,7 @@ function runSetup() {
       fs.mkdirSync(path.join(ROOT, 'data', 'avatars'), { recursive: true });
       const cfgPath = path.join(ROOT, 'data', 'config.json');
       if (!fs.existsSync(cfgPath)) {
-        fs.writeFileSync(cfgPath, JSON.stringify({ roundMinutes: 30, rankBasis: 'round', boardCount: 50, autostartCapture: true, lastRoomUrl: null, cappedThreshold: 2800, checkpointSec: 30 }, null, 2));
+        fs.writeFileSync(cfgPath, JSON.stringify({ roundMinutes: 30, rankBasis: 'round', boardCount: 50, autostartCapture: true, lastRoomUrl: null, cappedThreshold: 2800, checkpointSec: 30, surgeThreshold: 300, captureTabs: 2 }, null, 2));
       }
       step('data', 'ok', 'data/ 就绪（登录态与配置随包保留）');
     } catch (e) { step('data', 'fail', String(e).slice(0, 80)); return; }
@@ -217,9 +235,9 @@ function runSetup() {
     }
     await sleep(120);
 
-    // 5) 打开控制台 → 收工
-    await shell.openExternal(`${BASE}/`);
-    step('console', 'ok', '控制台已在浏览器打开');
+    // 5) 打开控制台 → 收工（--no-open 仅用于自动化测试，不改变正常启动）
+    if (!args.includes('--no-open')) await shell.openExternal(`${BASE}/`);
+    step('console', 'ok', args.includes('--no-open') ? '控制台已就绪（测试模式未打开浏览器）' : '控制台已在浏览器打开');
     await sleep(1400);
     app.quit();
   })();

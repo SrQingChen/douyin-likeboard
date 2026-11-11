@@ -2,10 +2,15 @@
 // 滑动窗口用"带时间戳的环形桶"：写入时校验时间戳（不符则清零重写），
 // 读取时按时间过滤 —— 长时间不活跃后的旧数据永远不会污染新窗口。
 
+import { isAuthorSecUid } from './author.js';
+
 export interface BoardRow {
   secUid: string; nick: string; avatar: string | null; badge: string | null;
   likes: number; speed: number; capped: boolean; rank: number;
   storeTotalLikes: number; storeChampion: number; storeRunner: number; storeThird: number;
+  surge: boolean;              // 高能冲刺中（10s 窗口折算 ≥ surgeThreshold 赞/分）
+  starGuard: boolean;          // 星守护（捕获层从勋章 URL 识别）
+  gemColor: string | null;     // 宝石行颜色：null=普通玻璃条；'rainbow'=彩虹流光；#RRGGBB=指定色
 }
 
 interface UserAgg {
@@ -23,10 +28,22 @@ interface UserAgg {
   peakSpeed: number;
   lastActiveSec: number;
   capped: boolean;
-  store: { totalLikes: number; champion: number; runner: number; third: number; badge: string | null };
+  starGuard: boolean;        // 星守护身份（本场/库中任一为真）
+  store: {
+    totalLikes: number; champion: number; runner: number; third: number; badge: string | null;
+    starGuard: boolean; gemColor: string | null;
+  };
 }
 
+/** 星守随机宝石色板（每场首次出现时随机取一色，本场稳定） */
+const GEM_PALETTE = ['#f43f5e', '#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#06b6d4', '#ec4899', '#84cc16', '#e2e8f0'];
+
 const MASK = /\*/;
+
+/** 高能冲刺速度：最近 10 秒点赞数 × 6 折算为 赞/分钟 */
+function surgeSpeed(u: UserAgg, nowSec: number): number {
+  return u.secRing.sum(nowSec, 10) * 6;
+}
 
 /** 时间戳环形桶（写入校验、读取过滤） */
 class Ring {
@@ -67,9 +84,14 @@ export class Aggregator {
 
   /** 点赞入账。返回 false = 重复消息被去重丢弃 */
   addLike(secUid: string, count: number, msgId: string, totalHint: number, atMs: number): boolean {
-    if (msgId) {
-      if (this.seenMsg.has(msgId)) return false;
-      this.seenMsg.set(msgId, 1);
+    // 去重键：正常情况下用 msgId（实测双标签收到同一事件的 msgId 完全一致）；
+    // 极少数缺失/为 "0" 的消息退回 (secUid, total) —— total 是房间累计值，事件级唯一。
+    const key = msgId && msgId !== '0'
+      ? msgId
+      : (totalHint > 0 ? `t:${secUid}:${totalHint}` : '');
+    if (key) {
+      if (this.seenMsg.has(key)) return false;
+      this.seenMsg.set(key, 1);
       if (this.seenMsg.size > this.seenCap) {
         const first = this.seenMsg.keys().next().value as string;
         this.seenMsg.delete(first);
@@ -101,22 +123,30 @@ export class Aggregator {
   }
 
   /** 档案更新（capture 档案分离协议） */
-  updateProfile(secUid: string, nick: string, avatar: string | null, atMs: number): { created: boolean; nickChanged: boolean } {
+  updateProfile(secUid: string, nick: string, avatar: string | null, starGuard: boolean, atMs: number):
+    { created: boolean; nickChanged: boolean; guardChanged: boolean } {
     const existed = this.users.has(secUid);
     const u = this.ensureUser(secUid, atMs);
-    let nickChanged = false;
+    let nickChanged = false, guardChanged = false;
     if (nick && nick !== u.nick) {
       u.nick = nick;
       if (!MASK.test(nick)) u.nickClean = nick;
       nickChanged = true;
     }
     if (avatar && avatar !== u.avatar) u.avatar = avatar;
-    return { created: !existed, nickChanged };
+    if (starGuard && !u.starGuard) { u.starGuard = true; guardChanged = true; }
+    return { created: !existed, nickChanged, guardChanged };
   }
 
-  setStoreInfo(secUid: string, info: { totalLikes: number; champion: number; runner: number; third: number; badge: string | null }) {
+  setStoreInfo(secUid: string, info: {
+    totalLikes: number; champion: number; runner: number; third: number; badge: string | null;
+    starGuard: boolean; gemColor: string | null;
+  }) {
     const u = this.users.get(secUid);
-    if (u) { u.store = info; u.knownInStore = true; }
+    if (u) {
+      u.store = info; u.knownInStore = true;
+      if (info.starGuard) u.starGuard = true;
+    }
   }
 
   markNotRookie(secUid: string) { const u = this.users.get(secUid); if (u) u.rookie = false; }
@@ -130,7 +160,8 @@ export class Aggregator {
         rookie: true, knownInStore: false,
         secRing: new Ring(), minRing: new Ring(),
         peakSpeed: 0, lastActiveSec: Math.floor(atMs / 1000), capped: false,
-        store: { totalLikes: 0, champion: 0, runner: 0, third: 0, badge: null },
+        starGuard: false,
+        store: { totalLikes: 0, champion: 0, runner: 0, third: 0, badge: null, starGuard: false, gemColor: null },
       };
       this.users.set(secUid, u);
     }
@@ -175,7 +206,8 @@ export class Aggregator {
   }
 
   /** 当前榜单（competition ranking 并列同名次） */
-  board(basis: 'round' | 'session', topN: number, nowMs: number, nickOf: (u: UserAgg) => string): BoardRow[] {
+  board(basis: 'round' | 'session', topN: number, nowMs: number, nickOf: (u: UserAgg) => string,
+    surgeThreshold = 300): BoardRow[] {
     const sec = Math.floor(nowMs / 1000);
     const key = (u: UserAgg) => basis === 'round' ? u.roundLikes : u.sessionLikes;
     const arr = [...this.users.values()].filter(u => key(u) > 0)
@@ -192,12 +224,47 @@ export class Aggregator {
         // 新星仅给"库中无档案的本场首秀"（knownInStore 跨场保持，防换房误标）
         badge: u.rookie && !u.knownInStore ? (u.store.badge ?? '新星') : u.store.badge,
         likes, speed: u.secRing.sum(sec, 60), capped: u.capped, rank,
+        surge: surgeSpeed(u, sec) >= surgeThreshold,
+        starGuard: this.isStarGuard(u),
+        gemColor: this.gemColorOf(u),
         // 累计 = 库累计 + 本场未结算部分（已结算部分已入库，防重复计算）
         storeTotalLikes: u.store.totalLikes + (u.sessionLikes - u.settledSession),
         storeChampion: u.store.champion, storeRunner: u.store.runner, storeThird: u.store.third,
       });
     }
     return rows;
+  }
+
+  /** 星守护：本场捕获到 or 库里曾标记（作者固定视为星守护，用于宝石行） */
+  private isStarGuard(u: UserAgg): boolean {
+    return isAuthorSecUid(u.secUid) || u.starGuard || u.store.starGuard;
+  }
+
+  /** 宝石色：手动指定 > 作者彩虹 > 星守本场随机；非星守返回 null（普通玻璃条） */
+  private gemColors = new Map<string, string>();
+  private gemColorOf(u: UserAgg): string | null {
+    if (!this.isStarGuard(u)) return null;
+    if (u.store.gemColor) return u.store.gemColor;
+    if (isAuthorSecUid(u.secUid)) return 'rainbow';
+    let c = this.gemColors.get(u.secUid);
+    if (!c) {
+      c = GEM_PALETTE[Math.floor(Math.random() * GEM_PALETTE.length)];
+      this.gemColors.set(u.secUid, c);
+    }
+    return c;
+  }
+
+  /** 当前冲刺最快的用户（10s 窗口折算 赞/分；无冲刺返回 null）——横幅用 */
+  topSurge(nowMs: number, threshold = 300): { secUid: string; nick: string; avatar: string | null; speed: number } | null {
+    const sec = Math.floor(nowMs / 1000);
+    let best: { secUid: string; nick: string; avatar: string | null; speed: number } | null = null;
+    for (const u of this.users.values()) {
+      const s = surgeSpeed(u, sec);
+      if (s >= threshold && (!best || s > best.speed)) {
+        best = { secUid: u.secUid, nick: (u.nickClean ?? u.nick) || u.secUid.slice(-6), avatar: u.avatar, speed: s };
+      }
+    }
+    return best;
   }
 
   /** 结算排名视图（settler 用；并列同名次） */
@@ -240,6 +307,7 @@ export class Aggregator {
       rateRing: new Ring(), peakRate: 0, lastMsgAt: 0,
     };
     this.seenMsg.clear(); // 换房后 msgId 空间独立，清空去重窗防误杀
+    this.gemColors.clear(); // 星守随机宝石色：每场首次出现时重新随机
   }
 
   /** 峰值速度清单（结算时更新 best_speed 用） */

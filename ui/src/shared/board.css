@@ -10,7 +10,7 @@
 
 * { box-sizing: border-box; }
 
-html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+html, body, #app { margin: 0; padding: 0; height: 100%; overflow: hidden; }
 
 body {
   font-family: var(--font-board);
@@ -61,6 +61,12 @@ body.transparent-mode { background: transparent !important; }
 .pedestal-1 { background: linear-gradient(180deg, rgba(255, 215, 106, 0.42), rgba(184, 134, 11, 0.14)); border: 1px solid rgba(255, 215, 106, 0.45); }
 .pedestal-2 { background: linear-gradient(180deg, rgba(215, 222, 234, 0.34), rgba(120, 132, 158, 0.12)); border: 1px solid rgba(215, 222, 234, 0.4); }
 .pedestal-3 { background: linear-gradient(180deg, rgba(226, 160, 106, 0.34), rgba(140, 88, 44, 0.12)); border: 1px solid rgba(226, 160, 106, 0.4); }
+/* 水晶奖台：晶面画布铺底，金/银/铜或作者/星守宝石色 */
+.pedestal-gem {
+  background: linear-gradient(180deg, rgba(10, 14, 28, 0.62), rgba(6, 9, 20, 0.50)) !important;
+  border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 10px 26px rgba(2, 4, 12, 0.40);
+}
 
 .crown-float { animation: crownFloat 2.6s ease-in-out infinite; filter: drop-shadow(0 4px 10px rgba(255, 215, 106, 0.45)); }
 @keyframes crownFloat { 0%, 100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-5px) rotate(3deg); } }
@@ -75,6 +81,14 @@ body.transparent-mode { background: transparent !important; }
 .rank-enter-from { opacity: 0; transform: translateX(28px); }
 .rank-leave-active { transition: all 0.35s ease; position: absolute; }
 .rank-leave-to { opacity: 0; transform: translateX(-28px); }
+
+/* 结算整榜重置：关闭 FLIP（逐行飞会互相穿插），直接定格到新轮 */
+.rank-reset .rank-move,
+.rank-reset .rank-enter-active,
+.rank-reset .rank-leave-active { transition: none !important; }
+.rank-reset .rank-enter-from,
+.rank-reset .rank-leave-to { opacity: 1; transform: none; }
+.rank-reset .rank-leave-active { position: static; }
 
 .speed-pulse { animation: speedPulse 1.1s ease-out; }
 @keyframes speedPulse { 0% { filter: brightness(2.2); transform: scale(1.25); } 100% { filter: brightness(1); transform: scale(1); } }
@@ -93,6 +107,102 @@ body.transparent-mode { background: transparent !important; }
 
 .capped-mark { animation: capBlink 2.4s ease-in-out infinite; }
 @keyframes capBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* ── 高能冲刺：鎏金流光 / 前三光环 / 横幅 ── */
+.surge-shimmer {
+  border-color: rgba(255, 215, 106, 0.55) !important;
+  box-shadow: 0 0 0 1px rgba(255, 215, 106, 0.35), 0 0 22px rgba(255, 215, 106, 0.28),
+    inset 0 0 26px rgba(255, 215, 106, 0.12);
+}
+.surge-shimmer::after {
+  content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(105deg,
+    transparent 18%, rgba(255, 246, 200, 0.35) 42%, rgba(255, 215, 106, 0.75) 50%,
+    rgba(255, 246, 200, 0.35) 58%, transparent 82%);
+  background-size: 240% 100%;
+  animation: goldSweep 2.4s linear infinite;
+  mix-blend-mode: screen; opacity: 0.5;
+}
+@keyframes goldSweep {
+  0% { background-position: 190% 0; }
+  100% { background-position: -90% 0; }
+}
+
+.surge-halo { position: relative; }
+.surge-halo::before {
+  content: ''; position: absolute; inset: -8px; border-radius: 9999px; z-index: 0;
+  background: conic-gradient(from 0deg,
+    rgba(255, 215, 106, 0) 0deg, #ffd76a 70deg, #fff6c8 120deg, #ffd76a 170deg,
+    rgba(255, 215, 106, 0) 240deg, rgba(255, 215, 106, 0) 360deg);
+  animation: haloSpin 2.2s linear infinite;
+  filter: drop-shadow(0 0 10px rgba(255, 215, 106, 0.55));
+}
+.surge-halo::after {
+  content: ''; position: absolute; inset: -4px; border-radius: 9999px; z-index: 0;
+  box-shadow: 0 0 26px 4px rgba(255, 215, 106, 0.5);
+  animation: haloPulse 1.6s ease-in-out infinite;
+}
+@keyframes haloSpin { to { transform: rotate(360deg); } }
+@keyframes haloPulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+.surge-mark { display: inline-block; animation: surgeWiggle 2.6s ease-in-out infinite; }
+@keyframes surgeWiggle {
+  0%, 100% { transform: rotate(-8deg) scale(1); }
+  50% { transform: rotate(8deg) scale(1.12); }
+}
+
+.rule-icon {
+  width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 18px;
+  background: rgba(255, 215, 106, 0.10);
+  border: 1px solid rgba(255, 215, 106, 0.22);
+}
+
+.surge-enter-active, .surge-leave-active { transition: opacity 0.4s ease, filter 0.4s ease; }
+.surge-enter-from, .surge-leave-to { opacity: 0; filter: blur(8px); }
+
+.chat-enter-active { transition: opacity 0.3s ease, filter 0.3s ease; }
+.chat-leave-active { transition: opacity 0.35s ease, filter 0.35s ease; }
+.chat-enter-from, .chat-leave-to { opacity: 0; filter: blur(6px); }
+
+/* ── 作者彩蛋：Sr_青尘 的昵称渐变五彩循环（按 secUid 判定，昵称可改）
+   短周期重复渐变：名字只有 40~50px 也能同时看到多种颜色（此前 300% 长渐变
+   在短名字上经常只截到金色，看起来“还是黄的”）── */
+.author-rainbow,
+.author-rainbow .mq-inner {
+  background-image: repeating-linear-gradient(90deg,
+    #ff4d6d 0px, #ff9f1c 5px, #ffe75e 10px, #4ade80 15px,
+    #38bdf8 20px, #a78bfa 25px, #f472b6 30px, #ff4d6d 35px);
+  background-size: 40px 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: authorRainbow 2.4s linear infinite;
+}
+@keyframes authorRainbow {
+  from { background-position: 0 0; }
+  to { background-position: 40px 0; }
+}
+/* 宝石行晶面是彩色的，昵称直接叠上去会“吃掉”渐变；提亮 + 暗色投影/描边拉开对比 */
+.author-rainbow {
+  filter: saturate(1.5) brightness(1.2)
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.95))
+    drop-shadow(0 0 3px rgba(0, 0, 0, 0.8));
+  -webkit-text-stroke: 0.5px rgba(0, 0, 0, 0.4);
+}
+
+/* ── 星守/作者宝石行：晶面画布铺底，这里压暗基底并保留透明通道 ── */
+.gem-row {
+  background: linear-gradient(160deg, rgba(9, 13, 30, 0.34), rgba(6, 9, 20, 0.24)) !important;
+  border-color: rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(10px) saturate(1.18);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.72);
+}
+.gem-row:not(.surge-shimmer) {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 8px 26px rgba(2, 4, 12, 0.45);
+}
+.gem-row .num-go { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55); }
 
 /* 桌面透明窗口（Electron）顶栏：可拖动区域 + 控件 */
 .eb-dragbar { -webkit-app-region: drag; app-region: drag; }
@@ -121,5 +231,22 @@ body.transparent-mode { background: transparent !important; }
 .transparent-mode .text-white\/45 { color: rgba(255, 255, 255, 0.65); }
 .transparent-mode .text-white\/50 { color: rgba(255, 255, 255, 0.7); }
 .transparent-mode .text-white\/55 { color: rgba(255, 255, 255, 0.75); }
+
+/* OBS/直播伴侣窗口捕获兼容：纯绿背景 + 近实底卡片，避免绿幕透过玻璃卡片 */
+.chroma-mode .glass {
+  /* 全不透明：绿幕不透过卡片，抠图时不会把卡片内部也抠掉 */
+  background: rgb(8, 12, 26);
+  border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+.chroma-mode .gem-row {
+  background: linear-gradient(160deg, rgb(9, 13, 30), rgb(6, 9, 20)) !important;
+}
+.chroma-mode .pedestal-gem {
+  background: linear-gradient(180deg, rgb(10, 14, 28), rgb(6, 9, 20)) !important;
+}
+.chroma-mode .pedestal-1 { background: linear-gradient(180deg, rgba(133, 92, 10, 0.94), rgba(64, 42, 4, 0.90)); }
+.chroma-mode .pedestal-2 { background: linear-gradient(180deg, rgba(74, 82, 100, 0.94), rgba(36, 42, 56, 0.90)); }
+.chroma-mode .pedestal-3 { background: linear-gradient(180deg, rgba(122, 76, 38, 0.94), rgba(58, 35, 16, 0.90)); }
 
 .num-go { font-variant-numeric: tabular-nums; }

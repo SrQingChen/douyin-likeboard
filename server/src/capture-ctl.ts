@@ -1,9 +1,10 @@
 // ─── 捕获进程监护：spawn + 崩溃自动重启（docs §5 core 守护）────────
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Hub } from './hub.js';
 import { browserInfo } from './version.js';
+import { getConfig } from './config.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../server/src
 const CAPTURE_ENTRY = path.resolve(here, 'capture', 'main.ts');
@@ -12,7 +13,7 @@ const ROOT = path.resolve(here, '..', '..');
 /** 组装 capture 环境防呆变量：内置 Chromium 目录存在 → 注入 PLAYWRIGHT_BROWSERS_PATH */
 function captureEnv(): Record<string, string> {
   const env: Record<string, string> = {
-    CAPTURE_TABS: process.env.CAPTURE_TABS ?? '2',
+    CAPTURE_TABS: String(getConfig().captureTabs),
     // Chrome 缺失 → capture 走内置 Chromium（防呆：空白机也能跑，日志会提示）
     CAPTURE_FORCE_CHANNEL: browserInfo.kind === 'chrome' ? '' : (browserInfo.kind === 'bundled-chromium' ? 'bundled' : ''),
   };
@@ -70,9 +71,15 @@ export class CaptureCtl {
 
   stop() {
     this.stopping = true;
-    if (this.child) {
-      try { this.child.kill(); } catch {}
-      this.child = null;
+    const pid = this.child?.pid;
+    if (pid) {
+      // Windows 上只 kill 父 node 会留下 Chrome/tsx 子进程；按进程树结束，避免下次启动 profile 被占用
+      if (process.platform === 'win32') {
+        try { spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 12_000 }); } catch {}
+      } else {
+        try { this.child?.kill(); } catch {}
+      }
     }
+    this.child = null;
   }
 }

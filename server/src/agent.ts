@@ -10,12 +10,18 @@ export interface AgentHooks {
   getResumeUrl?: () => string | null;
 }
 
+/** 活跃 agent 连接数：sim-event 等短连接不能把主捕获挤成 disconnected */
+let liveAgents = 0;
+
 export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, token: string, hooks: AgentHooks) {
   app.get('/agent', { websocket: true }, (socket: WebSocket, req) => {
     const q = (req.query as Record<string, string>) ?? {};
     if (q.token !== token) { socket.close(4001, 'bad token'); return; }
-    engine.setCaptureState('connected');
-    hub.log('捕获进程已接入');
+    liveAgents++;
+    if (liveAgents === 1) {
+      engine.setCaptureState('connected');
+      hub.log('捕获进程已接入');
+    }
     let lastAnchorSent = '';
 
     socket.on('message', (raw: Buffer) => {
@@ -30,10 +36,10 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
             break;
           }
           case 'profiles': {
-            const list: { u: string; nick: string; av: string | null }[] = m.list ?? [];
+            const list: { u: string; nick: string; av: string | null; sg?: boolean }[] = m.list ?? [];
             for (const p of list) {
               if (!p?.u || !p.nick) continue;
-              engine.applyProfile(p.u, p.nick, p.av ?? null);
+              engine.applyProfile(p.u, p.nick, p.av ?? null, p.sg === true);
               if (p.av) ensureAvatar(p.u, p.av);
             }
             break;
@@ -50,10 +56,15 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
             void applied;
             break;
           }
+          case 'chat': {
+            // 评论播报：{ t:'chat', u, nick?, text }
+            engine.onChat(String(m.u ?? ''), String(m.nick ?? ''), String(m.text ?? m.content ?? ''));
+            break;
+          }
           case 'room': {
             const anchor: string | null = m.anchor && m.anchor !== lastAnchorSent ? m.anchor : null;
             if (anchor) lastAnchorSent = m.anchor;
-            engine.onRoom(String(m.webRid ?? ''), m.anchor ?? null, Number(m.online ?? 0));
+            engine.onRoom(String(m.webRid ?? ''), m.anchor ?? null, Number(m.online ?? 0), Number(m.likeTotal ?? 0));
             break;
           }
           case 'status': {
@@ -69,8 +80,11 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
     });
 
     socket.on('close', () => {
-      engine.setCaptureState('disconnected');
-      hub.log('捕获进程连接断开');
+      liveAgents = Math.max(0, liveAgents - 1);
+      if (liveAgents === 0) {
+        engine.setCaptureState('disconnected');
+        hub.log('捕获进程连接断开');
+      }
     });
 
     socket.on('error', () => { try { socket.close(); } catch {} });

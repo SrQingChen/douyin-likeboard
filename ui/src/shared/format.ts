@@ -35,3 +35,10 @@ export function useCountUp(target: Ref<number>, opts: { dur?: number } = {}) {
 
 /** 头像 URL（本地缓存；404 由 <img onerror> 兜底占位） */
 export function avatarUrl(secUid: string): string { return `/api/avatar/${encodeURIComponent(secUid)}`; }
+
+/** 作者账号（Sr_青尘）的稳定身份：f46 secUid（账号级，不随昵称/头像/场次变化）。
+ *  数字 uid 97905874098 仅作备注；f73 是轮换令牌，不能用于身份判定。 */
+export const AUTHOR_SEC_UID = 'MS4wLjABAAAAhs9HSVhGCISlyr4RzfOhVsF24VwtOg_SfIx3xGlFVm8';
+export const AUTHOR_UID = '97905874098';
+export const isAuthor = (secUid?: string | null): boolean =>
+  !!secUid && secUid === AUTHOR_SEC_UID;

@@ -11,7 +11,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { decodePushFrame } from '../pb.js';
-import { parseChat, parseLike, parseMember, type UserProfile } from '../messages.js';
+import { parseChat, parseLike, parseMember, parseRoomStats, parseRoomUserSeq, type UserProfile } from '../messages.js';
 
 const CORE_WS = process.env.CORE_WS_URL ?? 'ws://127.0.0.1:17730/agent';
 const TOKEN = process.env.AGENT_TOKEN ?? '';
@@ -24,10 +24,10 @@ const CORE_ENTRY = path.resolve(HERE, '..', 'index.ts');
 const TABS = Math.max(1, Math.min(4, Number(process.env.CAPTURE_TABS ?? 2)));
 
 // ── 上报状态 ──
-interface ProfileEntry { nick: string; avatar: string | null; dirty: boolean }
+interface ProfileEntry { nick: string; avatar: string | null; starGuard: boolean; dirty: boolean }
 const profiles = new Map<string, ProfileEntry>();   // secUid → 档案（变化才上报）
 let likeBatch: { i: string; c: number; u: string; t: number }[] = [];
-let profileBatch: { u: string; nick: string; av: string | null }[] = [];
+let profileBatch: { u: string; nick: string; av: string | null; sg: boolean }[] = [];
 let lastRoomSent = '';
 let lastOnlineSent = 0;
 let ws: WebSocket | null = null;
@@ -90,11 +90,12 @@ const send = (o: unknown) => { try { if (ws?.readyState === WebSocket.OPEN) ws.s
 function noteProfile(u: UserProfile | null) {
   if (!u?.secUid) return;
   const cur = profiles.get(u.secUid);
-  if (!cur) profiles.set(u.secUid, { nick: u.nick, avatar: u.avatar, dirty: true });
+  if (!cur) profiles.set(u.secUid, { nick: u.nick, avatar: u.avatar, starGuard: u.starGuard, dirty: true });
   else {
     let dirty = false;
     if (u.nick && u.nick !== cur.nick) { cur.nick = u.nick; dirty = true; }
     if (u.avatar && u.avatar !== cur.avatar) { cur.avatar = u.avatar; dirty = true; }
+    if (u.starGuard && !cur.starGuard) { cur.starGuard = true; dirty = true; }
     if (dirty) cur.dirty = true;
   }
 }
@@ -104,6 +105,7 @@ let ctx: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | null = n
 let roomPages: Page[] = [];        // 多路采集标签（首个为监视基准页）
 let currentRoomUrl = '';
 let lastStatusSent = '';
+let loggedIn = false;
 
 const sendStatus = (state: string, reason?: string) => {
   if (state !== lastStatusSent || state === 'offline' || state === 'risk') {
@@ -112,12 +114,26 @@ const sendStatus = (state: string, reason?: string) => {
   }
 };
 
+let launchPromise: Promise<void> | null = null;
+
+/** 单飞：core 的 watch 与启动流程可能同时调用，绝不能让两个 launch 互相清理 */
+async function ensureBrowser(): Promise<void> {
+  if (ctx) return;
+  if (!launchPromise) {
+    launchPromise = launchBrowser().finally(() => { launchPromise = null; });
+  }
+  await launchPromise;
+}
+
 async function launchBrowser() {
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  // profile 被上一轮残留 Chrome 占用时，launchPersistentContext 会直接报
+  // “已在现有的浏览器会话中打开”；先按 profile 精确清理，避免首启就进入重启循环。
+  killStaleChrome();
   // 防呆：系统 Chrome 存在 → channel:'chrome'（实测最佳完整度）；
   // 缺失 → CAPTURE_FORCE_CHANNEL=bundled 走内置 Chromium（便携包 blank 机兜底，完整度可能略低）
   const useBundled = process.env.CAPTURE_FORCE_CHANNEL === 'bundled';
-  ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+  const myCtx = await chromium.launchPersistentContext(PROFILE_DIR, {
     ...(useBundled ? {} : { channel: 'chrome' }),
     headless: false,                       // 有头必须：headless 无 WS 推送（实测）
     viewport: null,                        // 真实窗口（固定视口在最大化时布局错乱，实测）
@@ -128,14 +144,35 @@ async function launchBrowser() {
       '--lang=zh-CN',
     ],
   });
-  roomPages = ctx.pages().length ? ctx.pages().slice(0, 1) : [await ctx.newPage()];
+  ctx = myCtx;
+  try {
+    const cookies = await myCtx.cookies('https://live.douyin.com');
+    loggedIn = cookies.some(c => ['sessionid', 'sessionid_ss', 'passport_csrf_token'].includes(c.name));
+    log(`登录态：${loggedIn ? '已登录' : '匿名'}（cookies=${cookies.length}）`);
+  } catch { log('登录态检测失败（按匿名处理）'); }
+  roomPages = myCtx.pages().length ? myCtx.pages().slice(0, 1) : [await myCtx.newPage()];
   wirePage(roomPages[0]);
-  ctx.on('page', p => { wirePage(p); });   // 用户/抖音自行开的标签也纳入监听
-  ctx.on('close', () => { if (!shuttingDown) { log('浏览器被关闭，8s 后重启'); setTimeout(() => void relaunch(), 8000); } });
+  myCtx.on('page', p => { wirePage(p); });   // 用户/抖音自行开的标签也纳入监听
+  myCtx.on('close', () => {
+    // 关键：旧上下文的 close 不能触发新一轮重启。relaunch 会先置空 ctx 再 close 旧上下文，
+    // 若这里不比较引用，就会形成“close→8s 后 relaunch→close 新上下文”的无限重启循环。
+    if (ctx !== myCtx) return;
+    ctx = null;
+    if (!shuttingDown) {
+      log('浏览器被关闭，8s 后重启');
+      scheduleRelaunch(8000);
+    }
+  });
   log(`Chrome 已启动（捕获窗口，采集路数=${TABS}）`);
 }
 
-let relaunchCount = 0; let relaunchTimes: number[] = [];
+let relaunchTimes: number[] = [];
+let relaunching = false;
+let relaunchTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleRelaunch(ms: number) {
+  if (shuttingDown || relaunchTimer) return;
+  relaunchTimer = setTimeout(() => { relaunchTimer = null; void relaunch(); }, ms);
+}
 /** 清理残留的捕获 Chrome（只杀命令行含本 profile 目录的进程，绝不误伤用户自己的浏览器） */
 function killStaleChrome() {
   try {
@@ -147,20 +184,32 @@ function killStaleChrome() {
   } catch {}
 }
 async function relaunch() {
+  if (shuttingDown || relaunching) return;
   const now = Date.now();
   relaunchTimes = relaunchTimes.filter(t => now - t < 600_000);
   if (relaunchTimes.length >= 6) { log('浏览器重启超限，报告 failed'); sendStatus('failed', 'browser-relaunch-limit'); return; }
   relaunchTimes.push(now);
-  try { await ctx?.close(); } catch {}
-  try { await launchBrowser(); if (currentRoomUrl) await gotoRoom(currentRoomUrl); }
-  catch (e) {
+  relaunching = true;
+  try {
+    const old = ctx;
+    ctx = null;                              // 先置空，旧上下文的 close 事件不再触发重启
+    try { await old?.close(); } catch {}
+    await ensureBrowser();
+    if (currentRoomUrl) await gotoRoom(currentRoomUrl);
+  } catch (e) {
     log('浏览器重启失败', e);
     killStaleChrome();                       // profile 被残留进程占用时的防呆清理
-    setTimeout(() => void relaunch(), 15_000);
+    scheduleRelaunch(15_000);
+  } finally {
+    relaunching = false;
   }
 }
 
 function wirePage(page: Page) {
+  // 导航诊断：被踢/换房/登录重定向都从这里留下证据
+  page.on('framenavigated', frame => {
+    if (frame === page.mainFrame()) log('页面导航 →', frame.url().slice(0, 140));
+  });
   // HTTP 侧：房间 enter/info 接口响应里有稳定的主播名（实测结构 data.room.data.owner）
   page.on('response', async res => {
     try {
@@ -213,11 +262,18 @@ function handleMsg(method: string, payload: Buffer) {
     const like = parseLike(payload);
     if (!like || !like.count) return;
     likeBatch.push({ i: like.msgId, c: like.count, u: like.secUid, t: like.total });
-    noteProfile({ secUid: like.secUid, nick: like.nick, avatar: like.avatar });
+    noteProfile({ secUid: like.secUid, nick: like.nick, avatar: like.avatar, starGuard: like.starGuard });
   } else if (method === 'WebcastMemberMessage') {
     const mem = parseMember(payload);
     if (mem.user) noteProfile(mem.user);
     if (mem.online > 0) lastOnlineSent = mem.online;
+  } else if (method === 'WebcastRoomUserSeqMessage') {
+    // 进房初期就能拿到在线人数，不必等第一个进场/点赞消息
+    const { online } = parseRoomUserSeq(payload);
+    if (online > 0 && online !== lastOnlineSent) { lastOnlineSent = online; sendRoom(false); }
+  } else if (method === 'WebcastRoomStatsMessage') {
+    const { online } = parseRoomStats(payload);
+    if (online > 0 && online !== lastOnlineSent) { lastOnlineSent = online; sendRoom(false); }
   } else if (method === 'WebcastChatMessage') {
     const chat = parseChat(payload);
     if (chat.user) noteProfile(chat.user);       // 弹幕用户昵称未打码概率高，优质档案源
@@ -242,7 +298,7 @@ async function gotoRoom(url: string) {
 
 async function watchRoom(url: string) {
   currentRoomUrl = url;
-  if (!ctx) await launchBrowser().catch(async e => { log('launch fail', e); await relaunch(); });
+  if (!ctx) await ensureBrowser().catch(async e => { log('launch fail', e); await relaunch(); });
   await gotoRoom(url);
 }
 
@@ -268,9 +324,26 @@ async function detectAnchor(): Promise<void> {
   if (anchor) pendingAnchor = anchor;
 }
 let pendingAnchor = '';
+let lastLikeTotal = 0;
+
+/** 页面头部「4001本场点赞」：进房后几秒即可拿到房间累计赞，作为 room 首帧上报。
+ *  只在没有点赞消息之前使用；真实 total 会由 LikeMessage 接管。 */
+async function detectRoomStats(): Promise<number> {
+  const base = roomPages[0];
+  if (!base) return 0;
+  const total = await base.evaluate(() => {
+    const text = document.body.innerText;
+    const m = text.match(/([0-9]+(?:\.[0-9]+)?)(万?)\s*本场点赞/);
+    if (!m) return 0;
+    return Math.round(Number(m[1]) * (m[2] === '万' ? 10000 : 1));
+  }).catch(() => 0);
+  if (total > 0 && total !== lastLikeTotal) { lastLikeTotal = total; sendRoom(false); }
+  return total;
+}
 
 /** 2s 房间状态机：URL 变化=换房；jingxuan 重定向=下播；verify=风控 */
 let anchorRetries = 0;
+let statsRetries = 0;
 async function roomMonitor() {
   const base = roomPages[0];
   if (!base || !ctx) return;
@@ -283,37 +356,56 @@ async function roomMonitor() {
       anchorRetries++;
       if (!pendingAnchor) await detectAnchor().catch(() => {});
     }
+    if (lastLikeTotal <= 0 && statsRetries < 10) {
+      statsRetries++;
+      await detectRoomStats().catch(() => {});
+    }
     return;
   }
   lastUrl = url;
   if (/live\.douyin\.com\/(\d{6,13})/.test(url)) {
     log('房间页面', url);
+    sendStatus('watching');   // 已进房即“监听中”，不必等第一条点赞（安静房间否则永远显示启动中）
+    lastLikeTotal = 0; statsRetries = 0;
     sendRoom(true);
     anchorRetries = 0;   // 主播名异步重试（进房瞬间元素未渲染，实测需等 2~6s）
     await detectAnchor().catch(() => {});
+    await detectRoomStats().catch(() => {});
   } else if (/jingxuan|\/select/.test(url)) {
     log('检测到下播（重定向精选页）');
     sendStatus('offline', 'redirected-to-jingxuan');
     currentRoomUrl = '';
   } else if (/verify|captcha|challenge/.test(url)) {
-    log('检测到验证页');
+    log('检测到验证页', url.slice(0, 140));
     sendStatus('risk', 'verify-page');
+  } else if (/passport|login|sso/.test(url)) {
+    log('检测到登录页', url.slice(0, 140));
+    sendStatus('risk', 'login-required');
   } else if (url === 'about:blank' || url === '') {
     sendStatus('starting');
+  } else if (/^https?:\/\/live\.douyin\.com\/?($|[?#])/.test(url)) {
+    // 被重定向回首页：匿名观看受限、下播、或风控；下一步刷新会自动重试
+    log(`直播间被重定向回首页（${loggedIn ? '已登录' : '匿名'}）`);
+    sendStatus(loggedIn ? 'starting' : 'risk', loggedIn ? 'redirected-home' : 'login-required');
+  } else {
+    log('未识别页面', url.slice(0, 140));
   }
 }
 
 let lastOnlineReported = -1;
+let lastLikeTotalReported = 0;
 function sendRoom(force: boolean) {
   const m = lastUrl.match(/live\.douyin\.com\/(\d{6,13})/);
   if (!m) return;
   const webRid = m[1];
-  // 强制/换房/有新主播名/在线人数变化 时上报（验证 P2-④：online 持续更新）
-  if (!force && webRid === lastRoomSent && !pendingAnchor && lastOnlineSent === lastOnlineReported) return;
+  // 强制/换房/有新主播名/在线人数变化/房间累计赞首帧变化 时上报
+  if (!force && webRid === lastRoomSent && !pendingAnchor
+      && lastOnlineSent === lastOnlineReported && lastLikeTotal === lastLikeTotalReported) return;
   lastRoomSent = webRid;
   lastOnlineReported = lastOnlineSent;
+  lastLikeTotalReported = lastLikeTotal;
   const anchor = pendingAnchor; pendingAnchor = '';
-  send({ t: 'room', webRid, anchor: anchor || null, online: lastOnlineSent });
+  send({ t: 'room', webRid, anchor: anchor || null, online: lastOnlineSent, likeTotal: lastLikeTotal || undefined });
 }
 
 // ── 200ms 批量上报 + 档案分离 ──
@@ -321,8 +413,8 @@ setInterval(() => {
   if (likeBatch.length) { send({ t: 'likes', batch: likeBatch, at: Date.now() }); likeBatch = []; }
   if (profileBatch.length || [...profiles.values()].some(p => p.dirty)) {
     profileBatch = [];
-    const list: { u: string; nick: string; av: string | null }[] = [];
-    for (const [u, p] of profiles) if (p.dirty) { list.push({ u, nick: p.nick, av: p.avatar }); p.dirty = false; }
+    const list: { u: string; nick: string; av: string | null; sg: boolean }[] = [];
+    for (const [u, p] of profiles) if (p.dirty) { list.push({ u, nick: p.nick, av: p.avatar, sg: p.starGuard }); p.dirty = false; }
     if (list.length) send({ t: 'profiles', list });
   }
 }, 200);
@@ -343,7 +435,7 @@ process.on('SIGTERM', () => void gracefulExit());
 (async () => {
   log('捕获进程启动', { CORE_WS, PROFILE_DIR });
   connectCore();
-  try { await launchBrowser(); }
+  try { await ensureBrowser(); }
   catch (e) {
     log('浏览器启动失败', e);
     sendStatus('failed', 'browser-launch');

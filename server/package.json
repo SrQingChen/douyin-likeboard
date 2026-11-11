@@ -1,6 +1,6 @@
 {
-  "name": "likeboard-server",
-  "version": "0.1.0",
+  "name": "likes-stats-server",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {

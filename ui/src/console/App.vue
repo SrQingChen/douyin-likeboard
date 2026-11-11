@@ -29,12 +29,15 @@ const captureLabel = computed(() => ({
 } as Record<string, [string, string]>)[snap.value?.capture ?? 'disconnected'] ?? ['未知', 'bg-slate-500']);
 
 const shuttingDown = ref(false);
+const closed = ref(false);
 async function shutdown() {
-  if (!confirm('确认关闭系统？将结算当前轮次并安全退出。')) return;
+  if (!confirm('确认关闭系统？将结算当前轮次，并关闭捕获浏览器和榜单窗口。')) return;
   shuttingDown.value = true;
   try { await fetch('/api/shutdown', { method: 'POST' }); } catch {}
-  document.title = '已关闭 · 点赞排行榜小助手';
+  document.title = '已关闭 · 多功能点赞统计助手';
+  closed.value = true;
 }
+function closeTab() { try { window.close(); } catch {} }
 onMounted(() => connectWs());
 </script>
 
@@ -44,7 +47,7 @@ onMounted(() => connectWs());
       <div class="flex items-center gap-2.5">
         <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-300 to-rose-400 flex items-center justify-center text-[16px]">👑</div>
         <div>
-          <div class="font-bold text-[15px] leading-tight">点赞排行榜小助手 <span class="text-[10px] font-mono text-amber-300/70 align-middle">v{{ APP_VERSION }}</span></div>
+          <div class="font-bold text-[15px] leading-tight">多功能点赞统计助手 <span class="text-[10px] font-mono text-amber-300/70 align-middle">v{{ APP_VERSION }}</span></div>
           <div class="text-[11px] text-white/45">抖音直播间 · 被动旁听 · SrQingChen</div>
         </div>
       </div>
@@ -76,7 +79,19 @@ onMounted(() => connectWs());
       <Settings v-else />
     </main>
     <footer class="shrink-0 text-center text-[10.5px] text-white/25 py-1.5 border-t border-white/5">
-      LikeBoard v{{ APP_VERSION }} · GPL-3.0 · SrQingChen · 纯被动旁听，不发送任何数据
+      多功能点赞统计助手 v{{ APP_VERSION }} · GPL-3.0 · SrQingChen · 纯被动旁听，不发送任何数据
     </footer>
+
+    <!-- 关闭完成页：明确告知已结算、捕获浏览器与榜单窗口已关闭 -->
+    <div v-if="closed" class="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-4 px-6"
+      style="background: #060914">
+      <div class="text-[46px]">👋</div>
+      <div class="text-[20px] font-bold">系统已关闭</div>
+      <p class="text-[13px] text-white/55 text-center leading-6">
+        当前轮次已结算，数据已落盘；捕获浏览器与独立榜单窗口已自动关闭。<br />
+        此标签页可以关闭了。
+      </p>
+      <button class="btn" @click="closeTab">关闭此标签页</button>
+    </div>
   </div>
 </template>

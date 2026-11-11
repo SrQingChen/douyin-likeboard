@@ -56,6 +56,30 @@ tr:hover td { background: rgba(255,255,255,0.03); }
 
 .num { font-variant-numeric: tabular-nums; }
 
+/* ── 作者彩蛋：Sr_青尘 的昵称渐变五彩循环（短周期，短名字也能看到多色）── */
+.author-rainbow {
+  background-image: repeating-linear-gradient(90deg,
+    #ff4d6d 0px, #ff9f1c 5px, #ffe75e 10px, #4ade80 15px,
+    #38bdf8 20px, #a78bfa 25px, #f472b6 30px, #ff4d6d 35px);
+  background-size: 40px 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: authorRainbow 2.4s linear infinite;
+}
+@keyframes authorRainbow {
+  from { background-position: 0 0; }
+  to { background-position: 40px 0; }
+}
+/* 宝石行晶面是彩色的，昵称直接叠上去会“吃掉”渐变；提亮 + 暗色投影/描边拉开对比 */
+.author-rainbow {
+  filter: saturate(1.5) brightness(1.2)
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.95))
+    drop-shadow(0 0 3px rgba(0, 0, 0, 0.8));
+  -webkit-text-stroke: 0.5px rgba(0, 0, 0, 0.4);
+}
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }

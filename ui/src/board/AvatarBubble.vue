@@ -2,8 +2,9 @@
 import { computed, ref } from 'vue';
 import { avatarUrl } from '../shared/format';
 
-const props = defineProps<{ secUid: string; nick: string; size: number; ring?: string }>();
+const props = defineProps<{ secUid: string; nick: string; size: number; ring?: string; avatar?: string | null }>();
 const failed = ref(false);
+const showImg = computed(() => !!props.avatar && !failed.value);
 const initials = computed(() => (props.nick || '赞')[0]);
 // 渐变占位色：由 secUid 派生稳定色相
 const hue = computed(() => {
@@ -15,7 +16,7 @@ const hue = computed(() => {
 <template>
   <div class="relative inline-flex items-center justify-center rounded-full overflow-hidden select-none"
     :class="ring" :style="{ width: size + 'px', height: size + 'px' }">
-    <img v-if="!failed" :src="avatarUrl(secUid)" :alt="nick" class="w-full h-full object-cover"
+    <img v-if="showImg" :src="avatarUrl(secUid)" :alt="nick" class="w-full h-full object-cover"
       loading="lazy" referrerpolicy="no-referrer" @error="failed = true" />
     <div v-else class="w-full h-full flex items-center justify-center font-bold text-white"
       :style="{ background: `linear-gradient(135deg, hsl(${hue} 65% 42%), hsl(${(hue + 60) % 360} 65% 32%))`, fontSize: size * 0.42 + 'px' }">

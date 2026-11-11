@@ -1,6 +1,6 @@
 {
-  "name": "likeboard-desktop",
-  "version": "1.0.0",
+  "name": "likes-stats-desktop",
+  "version": "0.2.0",
   "private": true,
   "main": "main.js",
   "devDependencies": {

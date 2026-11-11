@@ -12,24 +12,32 @@ function burst() {
   canvas.width = canvas.clientWidth * dpr; canvas.height = canvas.clientHeight * dpr;
   const W = canvas.width, H = canvas.height;
   const colors = ['#ffd76a', '#f472b6', '#818cf8', '#34d399', '#f8fafc'];
-  const parts = Array.from({ length: 160 }, () => ({
-    x: W / 2 + (Math.random() - 0.5) * W * 0.3,
-    y: H * 0.28,
-    vx: (Math.random() - 0.5) * 14 * dpr,
-    vy: (-6 - Math.random() * 9) * dpr,
-    w: (4 + Math.random() * 5) * dpr, h: (7 + Math.random() * 6) * dpr,
-    rot: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 0.25,
+  // 两组：中心爆发 + 顶部彩带雨（雨组让庆祝延续 4~6s，不是一闪就没）
+  const make = (rain: boolean) => ({
+    x: rain ? Math.random() * W : W / 2 + (Math.random() - 0.5) * W * 0.35,
+    y: rain ? -20 - Math.random() * H * 0.5 : H * 0.26,
+    vx: rain ? (Math.random() - 0.5) * 2 * dpr : (Math.random() - 0.5) * 13 * dpr,
+    vy: rain ? (1.0 + Math.random() * 2.4) * dpr : (-4 - Math.random() * 8) * dpr,
+    w: (3.5 + Math.random() * 5) * dpr, h: (6 + Math.random() * 6) * dpr,
+    rot: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 0.22,
     color: colors[Math.floor(Math.random() * colors.length)],
-    life: 1,
-  }));
-  const t0 = performance.now();
+    life: 1, rain,
+  });
+  const parts = [
+    ...Array.from({ length: 160 }, () => make(false)),
+    ...Array.from({ length: 100 }, () => make(true)),
+  ];
+  let last = performance.now();
   const step = (now: number) => {
-    const dt = Math.min(32, now - t0) / 16;
+    // 帧间隔（不是距开始时间）——否则 dt 迅速涨到 32，彩带 0.1s 内消失
+    const dt = Math.min(32, Math.max(0, now - last)) / 16;
+    last = now;
     ctx.clearRect(0, 0, W, H);
     let alive = false;
     for (const p of parts) {
-      p.vy += 0.32 * dpr; p.x += p.vx; p.y += p.vy; p.rot += p.vr;
-      p.life -= 0.006 * dt;
+      p.vy += (p.rain ? 0.10 : 0.22) * dpr * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt;
+      p.life -= (p.rain ? 0.0018 : 0.003) * dt;
       if (p.life > 0 && p.y < H + 20) {
         alive = true;
         ctx.save();

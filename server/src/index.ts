@@ -5,6 +5,7 @@ import fastifyStatic from '@fastify/static';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DB_PATH, TOKEN_PATH, DATA_DIR, loadConfig, getConfig, patchConfig, AVATAR_DIR, PROFILE_DIR } from './config.js';
 import { Store } from './store.js';
@@ -37,7 +38,8 @@ const store = new Store(DB_PATH);
 const hub = new Hub();
 const engine = new Engine(store, {
   onToast: (t) => hub.toast(t.kind, t.data),
-  onLog: (m) => { console.log(m); hub.log(m); },
+  onLog: (m) => hub.log(m),
+  onChat: (c) => hub.broadcast({ t: 'chat', data: c }),
 });
 
 // token（/agent 鉴权，重启轮换）
@@ -54,7 +56,7 @@ if (fs.existsSync(UI_DIST)) {
 }
 
 registerAgent(app, engine, hub, token, {
-  getResumeUrl: () => getConfig().autostartCapture ? getConfig().lastRoomUrl : null,
+  getResumeUrl: () => getConfig().lastRoomUrl, // 捕获一旦被拉起就恢复上次房间；autostart 只决定 core 启动时是否拉起
 });
 
 // /ws：UI/榜单快照通道（此前遗漏注册，导致前端无快照——DOM 验收发现）
@@ -65,7 +67,9 @@ app.get('/ws', { websocket: true }, (socket: import('ws').WebSocket) => {
 registerApi(app, engine, store, hub, {
   onShutdown: () => void shutdown(),
   onStopCapture: () => captureCtl?.stop(),
-  onStartCapture: () => { captureCtl?.start(); },
+  // 捕获可能因 autostartCapture=false 尚未创建：进入房间/点“重启捕获”时必须按需拉起，
+  // 否则 captureCtl?.start() 是空操作，UI 显示已排队但永远不会连上。
+  onStartCapture: () => { ensureCapture(); },
 });
 
 // 榜单路由（/board → board.html，vite 多页构建产物）
@@ -87,12 +91,17 @@ function ensureCapture() {
 }
 
 // 快照循环（1s）
+let shuttingDown = false;
 setInterval(() => {
+  if (shuttingDown) return; // 关闭中：不要再去碰已关闭的 DB/引擎
   engine.agg.tick(Date.now(), getConfig().cappedThreshold);
-  const rows = engine.snapshot(Date.now());
+  engine.tickSurge(Date.now());
+  const rows = engine.snapshot(Date.now(), Math.max(100, getConfig().boardCount));
   const cfg = getConfig();
-  const podium = rows.filter(r => r.rank <= 3);
-  const list = rows.filter(r => r.rank > 3);
+  // 按展示位切分（并列时 rank<=3 可能超过 3 人，用 rank 过滤会让多出来的人
+  // 既不在领奖台也不在列表里而“消失”）
+  const podium = rows.slice(0, 3);
+  const list = rows.slice(3);
   hub.broadcast({
     t: 'board', at: Date.now(),
     room: {
@@ -108,6 +117,9 @@ setInterval(() => {
       basis: cfg.rankBasis,
     },
     capture: engine.captureState,
+    boardCount: cfg.boardCount,          // 榜单页默认展示条数（展开预览可用 ?max=100 覆盖）
+    surgeThreshold: cfg.surgeThreshold,
+    surge: engine.activeSurge(),
     podium, list,
     stats: {
       likers: (() => { let n = 0; for (const u of engine.agg.users.values()) if (u.sessionLikes > 0) n++; return n; })(),
@@ -119,16 +131,40 @@ setInterval(() => {
 
 engine.startTimers();
 
-let shuttingDown = false;
+/** 关闭独立榜单窗口（透明/绿幕 Electron）；只按项目 desktop 路径匹配，绝不误杀其他 Electron 应用 */
+function killBoardWindows() {
+  const desktopDir = path.resolve(ROOT, 'desktop');
+  try {
+    // 注意：这里是 PowerShell 字符串 .Contains()，不是正则 —— 反斜杠不要二次转义，
+    // 只需要把单引号写成 ''。之前用正则转义导致路径变成 E:\\... 永不匹配。
+    const lit = desktopDir.replace(/'/g, "''");
+    spawnSync('powershell', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter "name='electron.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${lit}') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`],
+      { timeout: 12_000 });
+  } catch {}
+}
+/** 兜底清理捕获 Chrome：只杀命令行含本 profile 的进程（captureCtl 进程树结束后仍残留时） */
+function killCaptureChrome() {
+  try {
+    // 用 ASCII 特征匹配，避开中文路径在命令行里的编码差异
+    spawnSync('powershell', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine -match '--user-data-dir=.*chrome-profile' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`],
+      { timeout: 12_000 });
+  } catch {}
+}
+
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log('优雅关闭：结算 → 停捕获 → 关服务');
+  console.log('优雅关闭：结算 → 停捕获 → 关榜单窗口 → 关服务');
   try { engine.shutdown(); } catch (e) { console.error('engine shutdown', e); }
   captureCtl?.stop();
+  killCaptureChrome();
+  killBoardWindows();
   await agentCtl.shutdown();
   try { store.close(); } catch {}
-  setTimeout(() => process.exit(0), 800);
+  // 留一点时间让 /api/shutdown 的响应回到控制台，再退出
+  await new Promise(r => setTimeout(r, 300));
   await app.close().catch(() => {});
   process.exit(0);
 }

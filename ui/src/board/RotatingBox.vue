@@ -59,7 +59,7 @@ const next = () => { idx.value = (idx.value + 1) % Math.max(1, items.value.lengt
   <div v-if="current" class="glass rounded-2xl w-[172px] h-[172px] relative overflow-hidden cursor-pointer shrink-0"
     :title="`轮换中 · 共 ${items.length} 项（点击切换）`" @click="next" @mouseenter="paused = true" @mouseleave="paused = false">
     <div class="absolute top-0 left-0 right-0 h-[3px] bg-gradient-to-r from-amber-300/0 via-amber-300/70 to-amber-300/0" />
-    <Transition name="rb" mode="out-in">
+    <Transition name="rb">
       <div :key="current.key" class="absolute inset-0 flex flex-col items-center justify-center gap-1.5 px-4 text-center">
         <div class="text-[30px] leading-none drop-shadow">{{ current.icon }}</div>
         <div class="text-[13px] tracking-[0.22em] text-white/55 font-medium">{{ current.label }}</div>

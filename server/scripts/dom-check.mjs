@@ -55,7 +55,7 @@ const errors = [];
   await pg.goto('http://127.0.0.1:17730/', { waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
   await pg.waitForTimeout(3500);
   const text = await pg.evaluate(() => document.body.innerText);
-  ok(text.includes('点赞排行榜小助手'), '控制台标题');
+  ok(text.includes('多功能点赞统计助手'), '控制台标题');
   ok(text.includes('捕获控制'), '概览-捕获控制卡');
   ok(text.includes('本场实况'), '概览-数据卡');
   ok(text.includes('榜单预览'), '概览-榜单预览（iframe）');
