@@ -224,11 +224,15 @@ export class ExpTelemetry {
     } else if (key === 'dualBufferRoom') {
       const ev = String(m.ev ?? '');
       if (ev === 'switch-start') {
-        s.switches.push({ at: Date.now(), firstDataMs: null, keptFrames: Number(m.keptFrames ?? 0), totalMs: null });
+        s.switches.push({ at: Date.now(), firstDataMs: null, keptFrames: 0, totalMs: null });
         if (s.switches.length > 20) s.switches.shift();
-      } else if (ev === 'phase-b-done' && typeof m.totalMs === 'number') {
+      } else if (ev === 'phase-b-done') {
+        // 两阶段完成：记录全程耗时与切换期间旧房保留帧数（平滑度证据）
         const cur = s.switches[s.switches.length - 1];
-        if (cur) cur.totalMs = m.totalMs;
+        if (cur) {
+          if (typeof m.totalMs === 'number') cur.totalMs = m.totalMs;
+          if (typeof m.keptFrames === 'number') cur.keptFrames = m.keptFrames;
+        }
       }
     }
   }
@@ -247,6 +251,7 @@ export class ExpTelemetry {
   /** 当前生效采集路数（engine.effectiveTabs 用） */
   effectiveTabsOf(): number { return this.state('adaptiveTabs').tabs.effective; }
   pendingTab: number | null = null;
+  pendingFrom: number | null = null;
   pendingTabAt = 0;
   lastResponseMs: number | null = null;
 
@@ -266,10 +271,14 @@ export class ExpTelemetry {
       while (s.covSamples.length && s.covSamples[0].t < cutoff) s.covSamples.shift();
       if (s.preMeanCov != null) { s.postMeanSum += cov; s.postMeanN++; }
     }
-    // 未确认重发（≤3 次）
+    // 未确认重发（≤3 次；超限放弃并回滚乐观值，core 与 capture 路数不至漂移）
     if (this.pendingTab != null && nowMs - this.pendingTabAt > 60_000) {
       if (this.retries < 3) { this.retries++; send(this.pendingTab); this.pendingTabAt = nowMs; }
-      else { this.pendingTab = null; this.retries = 0; }
+      else {
+        s.tabs.effective = this.pendingFrom ?? s.tabs.effective;
+        this.pendingTab = null; this.pendingFrom = null; this.retries = 0;
+        this.log('adaptiveTabs', 'set-tabs-timeout', { rollbackTo: s.tabs.effective });
+      }
     }
     if (this.pendingTab != null) return; // 等确认期间不再决策
     const r = decideTabs(s.tabs, { cov, ratePerMin: rate }, nowMs);
@@ -284,7 +293,7 @@ export class ExpTelemetry {
         s.preMeanCov = base; s.preMeanAt = nowMs; s.postMeanSum = 0; s.postMeanN = 0;
       }
       this.lastChangeMark = nowMs;
-      this.pendingTab = r.tab; this.pendingTabAt = nowMs; this.retries = 0;
+      this.pendingTab = r.tab; this.pendingFrom = prev; this.pendingTabAt = nowMs; this.retries = 0;
       send(r.tab);
       this.log('adaptiveTabs', 'set-tabs-sent', { from: prev, to: r.tab, reason: r.reason });
     }

@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { decodePushFrame } from '../pb.js';
 import { parseChat, parseLike, parseMember, parseRoomStats, parseRoomUserSeq, type UserProfile } from '../messages.js';
 import { decodeImFetchBody } from './backfill.js';
+import { planGoto } from '../experiments.js';
 
 const CORE_WS = process.env.CORE_WS_URL ?? 'ws://127.0.0.1:17730/agent';
 const TOKEN = process.env.AGENT_TOKEN ?? '';
@@ -432,13 +433,14 @@ function handleMsg(method: string, payload: Buffer, page?: Page) {
 
 async function gotoRoom(url: string, via: 'watch' | 'relaunch' = 'watch') {
   if (!ctx) return;
-  const dual = expFlags.dualBufferRoom && roomPages.length > 1;
   // 首路：主导航；其余路：补齐标签后同址导航
   while (roomPages.length < curTabs) {
     const extra = await ctx.newPage().catch(() => null);
     if (!extra) break;
     roomPages.push(extra);   // wirePage 由 ctx.on('page') 自动完成
   }
+  // 双缓冲计划（纯函数，可测）：flag 关 = 并行导航（现状）；开 = 两阶段串行
+  const dual = planGoto(expFlags.dualBufferRoom, roomPages.length) === 'serial';
   const m = url.match(/live\.douyin\.com\/(\d{6,13})/);
   switchTargetRid = m ? m[1] : '';
   switchT0 = dual ? Date.now() : switchT0;

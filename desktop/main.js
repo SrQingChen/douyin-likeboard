@@ -21,7 +21,7 @@ const SETUP = args.includes('--setup');
 // OBS/直播伴侣的窗口枚举通常直接跳过，列表里看不到；该模式可被正常枚举/捕获。
 const CHROMA = args.includes('--chroma');
 const WINDOW_TITLE = CHROMA ? '多功能点赞统计助手（OBS兼容）' : '多功能点赞统计助手';
-const VERSION = '0.2.1';
+const VERSION = '0.3.0';
 const AUTHOR = 'SrQingChen';
 // 项目根：electron.exe desktop 启动时 appPath = desktop → 上级即根
 const ROOT = path.dirname(app.getAppPath ? app.getAppPath() : __dirname);

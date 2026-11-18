@@ -1,18 +1,35 @@
 # 项目状态 · 多功能点赞统计助手
 
-> 最后更新：2026-11-17 ｜ 版本：v0.2.1 ｜ 分支：main
+> 最后更新：2026-11-18 ｜ 版本：v0.3.0 ｜ 分支：main
 > 新窗口开工先读本文件 + `docs/开发交接.md`，不要重新调研。
 
 ---
 
 ## 一、一句话状态
 
-**本地旁听版已可稳定运行，官方平台入驻/互动插件已彻底放弃。** 项目已清理为纯产品仓库：礼物/付费效果全部移除，原鎏金动效改为免费「高能冲刺」；开放平台、软著、飞书资料已打包到项目外并从仓库删除。
+**本地旁听版稳定运行 + 实验性功能框架（v0.3.0）。** 4 个调研落地的实验功能（权威总量口径 / 进房补帧 / 自适应并发 / 双缓冲换房）在设置页折叠面板独立开关，**默认全关（与 v0.2.1 行为逐点一致）**，每项带独立日志与实时对照评分。官方平台入驻/互动插件已彻底放弃；项目为纯产品仓库。
 
 - 对外名称：**多功能点赞统计助手**
 - 形态：Windows 本地工具（core + capture + Vue 控制台/榜单 + Electron 透明/绿幕窗口）
 - 变现：无；不接平台接口、不做礼物、不做付费效果
-- 当前工作区：v0.2.1 修复改动待 commit（见「二之二」）
+- 当前工作区：v0.3.0（实验性功能框架，见「二之三」）
+
+---
+
+## 二之三、v0.3.0 实验性功能框架（2026-11-18）
+
+**流程**：调研报告（2026-11-17 两篇）→ 开发策划书 v1 → **双子代理独立核查**（代码级 + 外部事实网络调研）→ 策划书 v2 → 开发 → **验收子代理**（无 P0，P1 测试质量 3 项修复）→ 交付。策划书：`docs/开发策划书-实验性功能-2026-11-18.md`。
+
+1. **4 个实验功能**（设置页「🧪 实验性功能」折叠面板，默认全 false）：
+   - `totalAuthoritative`：本场点赞显示 `total − 进房基线`（官方权威口径，TikTok 官方生态同口径）；个人榜仍抽样。基线经 `noteRoomTotal` 单点锚定（DOM 首帧/WS 首条两序均正确；补帧历史 total 不锚定）。
+   - `fetchBackfill`：被动旁听页面自发 `/webcast/im/fetch`（`need_persist_msg_count=15`）响应；**三形态解码**（整体 gzip→JSON base64 / protobuf LiveResponse，社区独立调研结论）；补帧在 capture 侧缓存至 `announcedWebRid` 就绪后放行（core 先切会话）；**bf 只入计数不进速率环**（防假高能冲刺/速率尖峰/峰值污染）。
+   - `adaptiveTabs`：60s **窗口** coverage（`totalRing/rateRing`，非累计口径）< 97% 持续 30s（洪峰 >600/分 15s）→ +1 路 ≤4；>99.5% 5min 回落基线（不穿底）；60s 冷却 + 30min ≤8 次限频；`set-tabs` 指令运行时调路（不重启），`tabs-ack` 确认 + 60s×3 重发 + 超时回滚；**多路 msgId 重叠率**指标（检验"并集>单路"假设，外部社区无数据空白）。
+   - `dualBufferRoom`：换房两阶段（首路 await domcontentloaded → 其余路）；旧页切换期保留旧房推送（keptFrames 计数为平滑度证据）；预开标签（flag 门控）；跨房消息按 `r` 归属由 core 拦截（`applyLikeBatch`）。
+2. **框架**：`server/src/experiments.ts`（ExpTelemetry 多维评分 0-100 + 对照表 + 独立日志 `data/experimental/<key>.log` 懒创建+5MB 轮转 + decideTabs/planGoto 纯函数）；快照新增 `exp` 与 `room.authoritativeLikes`（纯附加）。
+3. **开关热生效**：PATCH /api/config → `agentCtl.expFlags()` 即时下发（capture `expFlags` 内存更新）；agent hello 重同步（任一实验开启才发）；进程重启由 `EXP_FLAGS` env 兜底；**experimental 单独 PATCH 不重启捕获**。
+4. **顺带修复**（行为等价的正确性/性能修复）：capture `wirePage` WeakSet 去重（历史双注册：`ctx.on('page')` 自动 + `gotoRoom` 手动，每帧解码两次靠 msgId 兜底）；指令串行化（watch/reload/set-tabs/relaunch 共用 promise 队列）；agent 点赞批量抽为可测函数 `applyLikeBatch`。
+5. **测试**：`experimental-test.mjs` **72 断言**（默认关闭一致性 / 三形态解码 / bf 不进速率环 / 决策器全路径含累计口径反例 / r 拦截生产路径 / 遥测结构 / config 深合并与键校验）；回归 replay 24 / dedupe 8 / starguard 16 / dom-check 24 / typecheck / ui build 全绿；运行时端到端（开关 ≤762ms 反映、日志生成、评分结构、回落）已由验收子代理实证。
+6. **外部事实核查结论**（子代理网络调研，与报告 B 比对）：im/fetch 响应**三形态**确认（JSON 分支 payload base64 无二次 gunzip 先例——保留为无害防御；protobuf 形态 payload 为原始字节）；`need_persist_msg_count=15` 语义与 msgId 去重被多实现证实；`LikeMessage.total` 权威口径被 TikTok 官方文档证实；多标签同房并集收益**社区无数据**（重叠率指标为此设计）。
 
 ---
 
@@ -113,6 +130,9 @@ cd server && npm run typecheck
 # 回放测试（24 断言）
 cd server && node --import tsx scripts/replay-test.mjs
 
+# 实验性功能回归（72 断言）
+cd server && node --import tsx scripts/experimental-test.mjs
+
 # DOM 验收（需 core + 数据源）
 cd server && node --import tsx scripts/dom-check.mjs
 
@@ -158,8 +178,8 @@ cd server && node scripts/sim-event.mjs --surge --top --count 60
    - 直播伴侣：高级功能「绿幕抠图」实际消费窗口透明通道，常规透明窗口即可（不需要绿背景）；相似度调到最低避免误伤正常区域；绿幕窗口仅作不识别 alpha 的采集端兜底
    - 个别采集端版本窗口列表不显示/丢 alpha 时，用绿幕窗口 + Chroma Key 兜底
    - 不要给真实 Electron 看板窗口注入 `WS_EX_LAYERED` 色键：已实测会色键不生效/渲染异常，需要独立原生 helper
-4. **版本 0.2.0**；本地目录名和 GitHub 仓库名仍是 `douyin-likeboard`/`抖音点赞排行榜小助手`，未改远程。
-5. **工作区未提交**：本轮改动较多，推 GitHub 前先 review `git diff`。
+4. **实验性功能默认全关**（v0.3.0）：不开启时行为与 v0.2.1 一致（验收子代理逐条核对）；大房间被动旁听拿不到全量仍是协议层事实（报告 B 五节），完整度照实展示。
+5. 本地目录名和 GitHub 仓库名仍是 `douyin-likeboard`/`抖音点赞排行榜小助手`，未改远程。
 
 ---
 

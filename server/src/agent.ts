@@ -11,6 +11,25 @@ export interface AgentHooks {
   getResumeUrl?: () => string | null;
 }
 
+export interface LikeBatchItem { i: string; c: number; u: string; t?: number; r?: string; bf?: number }
+
+/** 点赞批量入账（抽为可测函数）：
+ *  - 消息房间归属（实验特性）：报文带 r 且与当前会话不符 → 丢弃并计数
+ *    （双缓冲换房期旧房页消息 / 换房时序窗内跨房消息，防止污染新会话与 total 基线）；
+ *  - bf（进房补帧）标记透传给引擎与实验遥测。 */
+export function applyLikeBatch(engine: Engine, batch: LikeBatchItem[], at: number): void {
+  for (const b of batch) {
+    if (!b?.u || !b.c) continue;
+    if (b.r && b.r !== engine.agg.room.webRid) {
+      engine.exp?.noteCrossRoomDrop();
+      continue;
+    }
+    const src = b.bf === 1 ? 'bf' : 'ws';
+    const ok = engine.addLike(b.u, Math.max(0, b.c | 0), b.i ?? '', b.t ?? 0, at, src);
+    engine.exp?.noteLike(src, ok, Math.max(0, b.c | 0), b.u, at);
+  }
+}
+
 /** 活跃 agent 连接数：sim-event 等短连接不能把主捕获挤成 disconnected */
 let liveAgents = 0;
 
@@ -34,8 +53,10 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
             engine.setCaptureState('starting');
             const resume = hooks.getResumeUrl?.() ?? null;
             if (resume) send({ t: 'watch', url: resume });
-            // 实验状态重同步（进程/浏览器重启后不丢）：flags + 生效路数
-            send({ t: 'exp-flags', flags: getConfig().experimental });
+            // 实验状态重同步（进程/浏览器重启后不丢）：任一实验开启才下发（全关态保持零指令，
+            // 与"默认关闭时 capture 不收到任何新指令"的字面承诺一致）
+            const flags = getConfig().experimental;
+            if (Object.values(flags).some(Boolean)) send({ t: 'exp-flags', flags });
             const eff = engine.exp?.effectiveTabsOf();
             if (eff && eff > getConfig().captureTabs) send({ t: 'set-tabs', n: eff });
             break;
@@ -50,20 +71,8 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
             break;
           }
           case 'likes': {
-            const batch: { i: string; c: number; u: string; t?: number; r?: string; bf?: number }[] = m.batch ?? [];
-            const at = m.at ?? Date.now();
-            for (const b of batch) {
-              if (!b?.u || !b.c) continue;
-              // 消息房间归属（实验特性）：报文带 r 且与当前会话不符 → 丢弃
-              // （双缓冲换房期旧房页消息 / 换房时序窗内跨房消息，防止污染新会话与 total 基线）
-              if (b.r && b.r !== engine.agg.room.webRid) {
-                engine.exp?.noteCrossRoomDrop();
-                continue;
-              }
-              const src = b.bf === 1 ? 'bf' : 'ws';
-              const ok = engine.addLike(b.u, Math.max(0, b.c | 0), b.i ?? '', b.t ?? 0, at, src);
-              engine.exp?.noteLike(src, ok, Math.max(0, b.c | 0), b.u, at);
-            }
+            const batch: LikeBatchItem[] = m.batch ?? [];
+            applyLikeBatch(engine, batch, m.at ?? Date.now());
             engine.captureState = 'watching';
             break;
           }

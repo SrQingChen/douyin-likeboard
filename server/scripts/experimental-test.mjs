@@ -6,6 +6,7 @@ import { Engine } from '../src/engine.ts';
 import { Store } from '../src/store.ts';
 import { decodeImFetchBody } from '../src/capture/backfill.ts';
 import { decideTabs, planGoto, ExpTelemetry } from '../src/experiments.ts';
+import { applyLikeBatch } from '../src/agent.ts';
 import { DEFAULT_CONFIG, loadConfig, patchConfig, CONFIG_PATH } from '../src/config.ts';
 import zlib from 'node:zlib';
 import fs from 'node:fs';
@@ -33,7 +34,7 @@ console.log('\n[1] 默认关闭 = 与现状一致（计数路径）');
   a.addLike('u2', 5, 'm2', 108, t + 1);
   ok(a.room.counted === 15 && a.room.sessionLikes === 15, '计数与 sessionLikes 一致', `${a.room.counted}`);
   ok(a.room.roomTotal === 108 && a.room.totalDelta === 8, 'total 跟踪与旧逻辑一致', `total=${a.room.roomTotal} delta=${a.room.totalDelta}`);
-  ok(a.coveragePct() === 100 * 15 / 8 / 100 * 100 / 100 || true, '（口径存在即可）');
+  ok(a.coveragePct() === 100, 'coverage 上限钳制 100（counted>totalDelta 时不超 100）', `${a.coveragePct()}`);
   ok(a.authoritativeLikes() === 8, 'authoritative = total − 首帧基线（100）', `${a.authoritativeLikes()}`);
   const u1 = a.users.get('u1');
   ok(u1.secRing.sum(Math.floor((t + 2) / 1000), 60) === 10, '速率环正常入账（默认路径）');
@@ -225,24 +226,36 @@ console.log('\n[5] EXP-3 决策器（窗口口径 / 数据门 / 升降 / 冷却 
   }
 }
 
-console.log('\n[6] EXP-4 导航计划与消息房间归属');
+console.log('\n[6] EXP-4 导航计划与消息房间归属（生产路径 applyLikeBatch）');
 {
   ok(planGoto(false, 4) === 'parallel', 'flag 关 → 并行导航（现状）');
   ok(planGoto(false, 1) === 'parallel', 'flag 关单页 → 并行（等价现状）');
   ok(planGoto(true, 4) === 'serial', 'flag 开多页 → 两阶段串行');
   ok(planGoto(true, 1) === 'parallel', 'flag 开但单页 → 并行（无需两阶段）');
-  // 归属语义：agg.room.webRid 匹配才入账（agent 层校验的 core 侧依据）
+  // 真实生产路径：agent.ts 的 applyLikeBatch（r 归属拦截 + bf 透传全链路）
   const here = path.dirname(fileURLToPath(import.meta.url));
   const TMP = path.resolve(here, '..', 'testdata', `exp2-tmp-${Date.now()}.db`);
   const store = new Store(TMP);
   const engine = new Engine(store, { onToast: () => {}, onLog: () => {}, onChat: () => {} });
+  const tel = new ExpTelemetry();
+  tel.attachHub({ log: () => {} });
+  tel.setRunning({ ...DEFAULT_CONFIG.experimental, dualBufferRoom: true, fetchBackfill: true });
+  engine.exp = tel;
   engine.startSession('111222', '新房');
-  engine.addLike('newu', 5, 'n1', 0, Date.now());
-  ok(engine.agg.room.counted === 5, '新房消息入账');
-  // 模拟 agent 校验：r ≠ 当前 webRid → 不调 addLike（丢弃）
-  const stale = { u: 'oldu', c: 9, i: 'o1', t: 0, r: '999000' };
-  if (stale.r !== engine.agg.room.webRid) { /* agent.ts 实际逻辑：continue 丢弃 */ }
-  ok(engine.agg.room.counted === 5, '旧房消息（r 不匹配）被拦截不入账');
+  const t = Date.now();
+  applyLikeBatch(engine, [
+    { i: 'n1', c: 5, u: 'newu', t: 100, r: '111222' },             // 新房（r 匹配）→ 入账
+    { i: 'o1', c: 9, u: 'oldu', t: 0, r: '999000' },                // 旧房（r 不匹配）→ 拦截
+    { i: 'n2', c: 3, u: 'bfu', t: 0, r: '111222', bf: 1 },          // 新房补帧 → 入账
+    { i: 'n3', c: 7, u: 'newu', t: 0 },                             // 无 r（全关态报文）→ 直接入账
+    { i: '', c: 0, u: 'bad', t: 0 },                                // 非法项 → 跳过
+  ], t);
+  ok(engine.agg.room.counted === 15, 'r 匹配/无 r/bf 入账，r 不匹配被拦截（5+3+7）', `${engine.agg.room.counted}`);
+  const m4 = tel.fillEngineCompare(engine).metrics.dualBufferRoom;
+  ok(m4.compare['跨房拦截'] === 1, '跨房拦截计数=1（applyLikeBatch 生产路径）');
+  // 同 msgId 跨批重复：bf 补帧与 WS 重叠 → core 去重
+  applyLikeBatch(engine, [{ i: 'n2', c: 3, u: 'bfu', t: 0, r: '111222' }], t + 10);
+  ok(engine.agg.room.counted === 15, '补帧与 WS 同 msgId 重复 → 生产路径去重生效');
   try { store.close(); fs.rmSync(TMP, { force: true }); } catch {}
 }
 
@@ -259,8 +272,11 @@ console.log('\n[7] ExpTelemetry：评分结构 / 对照表 / 独立日志 / 开�
   tel.noteLike('bf', true, 5, 'u2', t + 200);       // 补帧先到
   tel.noteLike('bf', false, 5, 'u3', t + 300);      // 去重拦截
   tel.noteCapture('fetchBackfill', { decoded: 20, failed: 1 });
-  tel.noteCapture('dualBufferRoom', { ev: 'switch-done', totalMs: 2500, keptFrames: 8 });
+  // EXP-4 真实事件序列（与 capture/main.ts 的 expSend 完全一致）
+  tel.noteCapture('dualBufferRoom', { ev: 'switch-start', via: 'watch' });
   tel.noteCapture('dualBufferRoom', { ev: 'first-data', ms: 1800 });
+  tel.noteCapture('dualBufferRoom', { ev: 'phase-a-done', ms: 1200 });
+  tel.noteCapture('dualBufferRoom', { ev: 'phase-b-done', ms: 2500, totalMs: 2500, keptFrames: 8 });
   tel.noteCrossRoomDrop();
   const here = path.dirname(fileURLToPath(import.meta.url));
   const TMP = path.resolve(here, '..', 'testdata', `exp3-tmp-${Date.now()}.db`);

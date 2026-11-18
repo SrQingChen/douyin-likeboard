@@ -18,3 +18,5 @@ Thumbs.db
 
 # 平台/软著资料（项目外归档，不随仓库分发）
 软著申请/
+testdata/*-tmp-*
+data/experimental/
