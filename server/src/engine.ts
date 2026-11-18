@@ -3,6 +3,7 @@
 import { Aggregator, type BoardRow } from './aggregator.js';
 import { Store } from './store.js';
 import { getConfig } from './config.js';
+import type { ExpTelemetry } from './experiments.js';
 
 export interface SettleResult {
   roundIdx: number;
@@ -60,6 +61,11 @@ export class Engine {
   private chatAt = new Map<string, number>();
 
   constructor(private store: Store, private ev: EngineEvents) {}
+
+  /** 实验遥测（index 装配时注入；为 null 时所有实验打点为空操作） */
+  exp: ExpTelemetry | null = null;
+  /** EXP-3：当前生效采集路数（决策器状态；无实验时等于基线 captureTabs） */
+  effectiveTabs(): number { return this.exp?.effectiveTabsOf() ?? getConfig().captureTabs; }
 
   /** 每秒调用：检测冲刺最快用户并刷新横幅（榜单行级鎏金由快照 surge 字段驱动） */
   tickSurge(nowMs = Date.now()): void {
@@ -134,8 +140,9 @@ export class Engine {
     }
     if (anchor) this.agg.room.anchor = anchor;
     if (online > 0) this.agg.room.online = online;
-    // 进房时的页面「本场点赞」只用于首帧展示；后续以 LikeMessage.total 为准
-    if (likeTotal > 0 && this.agg.room.roomTotal < 0) this.agg.room.roomTotal = likeTotal;
+    // 进房时的页面「本场点赞」只用于首帧展示（EXP-1 基线锚定单点收口）；
+    // 后续以 LikeMessage.total 为准
+    if (likeTotal > 0 && this.agg.room.roomTotal < 0) this.agg.noteRoomTotal(likeTotal, 'dom');
   }
 
   startSession(webRid: string, anchor: string | null) {
@@ -145,6 +152,7 @@ export class Engine {
     this.sessionId = this.store.openSession(webRid, anchor);
     this.sessionStartedAt = Date.now();
     this.startRound(1);
+    this.exp?.noteSession(this.sessionStartedAt);
     this.ev.onLog(`开场：房间 ${webRid}${anchor ? ` · ${anchor}` : ''}`);
   }
 
@@ -309,11 +317,12 @@ export class Engine {
     }
   }
 
-  /** 点赞入账（agent 调用）+ 新用户库档案同步 */
-  addLike(secUid: string, count: number, msgId: string, totalHint: number, atMs: number): boolean {
+  /** 点赞入账（agent 调用）+ 新用户库档案同步。
+   *  src='bf' 为进房补帧消息：只入计数，不进速率环（aggregator 内处理）。 */
+  addLike(secUid: string, count: number, msgId: string, totalHint: number, atMs: number, src: 'ws' | 'bf' = 'ws'): boolean {
     if (!this.sessionId) return false; // 无会话（未进房）时丢弃，诚实原则
     const isNew = !this.agg.users.has(secUid);
-    const ok = this.agg.addLike(secUid, count, msgId, totalHint, atMs);
+    const ok = this.agg.addLike(secUid, count, msgId, totalHint, atMs, src);
     if (ok && isNew) this.refreshStoreInfoFor([secUid]);
     if (ok) this.checkMilestone();
     return ok;

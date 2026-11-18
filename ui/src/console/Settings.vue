@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// 设置：热更新配置 / 榜单窗口指南 / 数据导出 / 使用说明
-import { ref, onMounted } from 'vue';
+// 设置：热更新配置 / 榜单窗口指南 / 数据导出 / 使用说明 / 实验性功能
+import { ref, computed, onMounted } from 'vue';
 import { api, patch, post } from './api';
+import { roState } from '../shared/store';
 import { fmtNum } from '../shared/format';
 
 const cfg = ref<any>(null);
@@ -50,6 +51,49 @@ async function save() {
   });
   saved.value = true; setTimeout(() => (saved.value = false), 2500);
 }
+
+// ── 实验性功能（默认全关；关闭时系统行为与正式版一致）──
+const expOpen = ref(false);                 // 折叠面板（默认收起）
+const expBusy = ref<string | null>(null);
+const expMeta: { key: string; name: string; desc: string; note: string }[] = [
+  {
+    key: 'totalAuthoritative', name: '权威总量口径',
+    desc: '「本场点赞」改用房间官方累计值（total − 进房基线）显示，总量口径接近 100% 准确；个人榜单仍为抽样（完整度徽章照常显示）。',
+    note: '纯显示层切换，随时关闭；个人排名不受影响。',
+  },
+  {
+    key: 'fetchBackfill', name: '进房补帧',
+    desc: '旁听页面进房时自发请求的 im/fetch 接口响应，回补最近 15 条持久化消息——把"刚进房看不到数据"的空窗缩到秒级。零额外请求（页面本来就在调）。',
+    note: '补帧只入计数、不进速率环，不会造成假冲刺；与 WS 消息按 msgId 自动去重。',
+  },
+  {
+    key: 'adaptiveTabs', name: '自适应并发',
+    desc: '洪峰期完整度下降时自动加开采集标签（最多 4 路），低峰回落到你的基础路数。按 60 秒窗口完整度决策，带防振荡保护。',
+    note: '多标签是正常浏览器行为特征（上限维持 4）；开关关闭立即回落。',
+  },
+  {
+    key: 'dualBufferRoom', name: '双缓冲换房',
+    desc: '换房时首路先导航、加载完成后再切其余路：换房空窗更短，旧房推送在切换期间不中断；浏览器启动时预开标签。',
+    note: '跨房消息按房间归属自动拦截，不会计入新房间。',
+  },
+];
+const expFlags = computed<Record<string, boolean>>(() => cfg.value?.experimental ?? {});
+const expSnapshot = computed(() => roState.snap?.exp ?? null);
+
+async function toggleExp(key: string) {
+  if (expBusy.value) return;
+  expBusy.value = key;
+  try {
+    const next = { ...expFlags.value, [key]: !expFlags.value[key] };
+    cfg.value = await patch('/api/config', { experimental: next });
+  } catch (e: any) { alert('实验开关设置失败：' + e.message); }
+  expBusy.value = null;
+}
+const fmtSince = (ms: number) => {
+  if (!ms) return '—';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.floor(s / 60)}min` : `${Math.floor(s / 3600)}h`;
+};
 
 const boardMsg = ref<string | null>(null);
 async function openBoard(mode: string) {
@@ -135,6 +179,80 @@ async function openBoard(mode: string) {
         <div class="flex items-center gap-3">
           <button class="btn btn-primary" @click="save">保存（热生效）</button>
           <Transition name="banner"><span v-if="saved" class="text-emerald-300 text-[12.5px]">✓ 已保存</span></Transition>
+        </div>
+      </div>
+    </section>
+
+    <!-- 🧪 实验性功能：折叠面板（默认收起）——每功能独立开关 + 实时对照评分 -->
+    <section class="glass rounded-2xl p-5 col-span-1 lg:col-span-2" style="border-color: rgba(125, 211, 252, 0.22)">
+      <button class="w-full flex items-center justify-between gap-3 text-left" @click="expOpen = !expOpen">
+        <h2 class="font-bold text-[14px]">🧪 实验性功能
+          <span class="text-[11px] font-normal text-white/40">（默认全部关闭；关闭时与正式版行为完全一致）</span>
+        </h2>
+        <span class="text-[12px] text-white/50 shrink-0">{{ expOpen ? '收起 ▲' : '展开 ▼' }}</span>
+      </button>
+      <div v-if="expOpen" class="mt-4 flex flex-col gap-3">
+        <p class="text-[12px] text-white/50 leading-5">
+          以下功能来自完整率提升调研（docs/调研报告-用户侧完整率提升-2026-11-17.md），尚未长跑验证。
+          每个功能有<b class="text-white/75">独立日志</b>（data/experimental/&lt;功能&gt;.log）与
+          <b class="text-white/75">对照评分</b>（与未开启口径实时比对），便于评估效果后决定去留。
+          开关即时生效，无需重启。
+        </p>
+        <div v-for="m in expMeta" :key="m.key"
+          class="rounded-xl border p-3.5 transition-colors"
+          :class="expFlags[m.key] ? 'border-sky-300/35 bg-sky-400/[0.06]' : 'border-white/10 bg-white/[0.02]'">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-bold text-[13.5px]">{{ m.name }}</span>
+                <span v-if="expFlags[m.key]" class="text-[10px] px-1.5 py-px rounded-full font-bold bg-emerald-400/15 text-emerald-300 border border-emerald-300/30">运行中</span>
+                <span v-else class="text-[10px] px-1.5 py-px rounded-full bg-white/10 text-white/50 border border-white/10">已关闭</span>
+                <span class="text-[10px] text-white/35 font-mono">{{ m.key }}</span>
+              </div>
+              <p class="text-[12px] text-white/60 leading-5 mt-1.5">{{ m.desc }}</p>
+              <p class="text-[11px] text-white/40 mt-1">💡 {{ m.note }}</p>
+            </div>
+            <button class="btn shrink-0" :class="expFlags[m.key] ? 'tab-active' : ''"
+              :disabled="expBusy === m.key" @click="toggleExp(m.key)">
+              {{ expBusy === m.key ? '…' : expFlags[m.key] ? '已开启（点此关闭）' : '已关闭（点此开启）' }}
+            </button>
+          </div>
+          <!-- 实时评分卡（快照 exp.metrics；未开启且无历史数据时隐藏） -->
+          <div v-if="expSnapshot?.metrics?.[m.key]" class="mt-3 pt-3 border-t border-white/10">
+            <div class="flex items-center gap-2 flex-wrap mb-2">
+              <span class="text-[11.5px] font-bold text-white/70">对照评分</span>
+              <span class="text-[11px] text-white/40" v-if="expSnapshot.metrics[m.key]!.since">
+                已运行 {{ fmtSince(expSnapshot.metrics[m.key]!.since) }}
+              </span>
+              <span class="ml-auto text-[13px] font-black num"
+                :class="(expSnapshot.metrics[m.key]!.score ?? 0) >= 70 ? 'text-emerald-300' : (expSnapshot.metrics[m.key]!.score ?? 0) >= 40 ? 'text-amber-300' : 'text-rose-300'">
+                {{ expSnapshot.metrics[m.key]!.score }} 分
+              </span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+              <div v-for="d in expSnapshot.metrics[m.key]!.dims" :key="d.key" class="rounded-lg bg-white/[0.04] px-2.5 py-2">
+                <div class="flex justify-between text-[11px] mb-1">
+                  <span class="text-white/55">{{ d.label }}</span>
+                  <span class="num text-white/80">{{ Math.round(d.value) }}</span>
+                </div>
+                <div class="h-1.5 rounded-full bg-white/10 overflow-hidden">
+                  <div class="h-full rounded-full transition-all duration-700"
+                    :class="d.value >= 70 ? 'bg-emerald-400' : d.value >= 40 ? 'bg-amber-400' : 'bg-rose-400'"
+                    :style="{ width: Math.max(2, Math.min(100, d.value)) + '%' }" />
+                </div>
+                <div class="text-[10px] text-white/40 mt-1">{{ d.unit }}</div>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-[11px]">
+              <div v-for="(v, k) in expSnapshot.metrics[m.key]!.compare" :key="k" class="flex justify-between gap-2">
+                <span class="text-white/40 truncate" :title="k">{{ k }}</span>
+                <span class="num text-white/75 shrink-0">{{ typeof v === 'number' ? fmtNum(v) : v }}</span>
+              </div>
+            </div>
+            <div v-if="expSnapshot.metrics[m.key]!.lastEvents?.length" class="mt-2 text-[10.5px] font-mono text-white/40 leading-4">
+              <div v-for="(e, i) in expSnapshot.metrics[m.key]!.lastEvents" :key="i">{{ e }}</div>
+            </div>
+          </div>
         </div>
       </div>
     </section>

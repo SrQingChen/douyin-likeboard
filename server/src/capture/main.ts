@@ -3,6 +3,10 @@
 //      core（档案分离协议）+ 房间状态机（换房/下播/风控检测）。
 // 纯被动：从不向 WS 发帧、不调业务接口、无登录要求。
 // 长跑自愈（v0.1.1）：WS 静默看门狗（刷新→重建递进）+ core 看护（互为守护）。
+// 实验性功能（v0.3.0，默认全关；见 docs/开发策划书-实验性功能-2026-11-18.md）：
+//  - EXP-2 fetchBackfill：被动旁听页面自发的 /webcast/im/fetch 响应（进房补帧）；
+//  - EXP-3 set-tabs：core 运行时增减采集标签（不重启进程）；
+//  - EXP-4 dualBufferRoom：换房两阶段导航 + 旧标签保留旧房推送 + 启动预开标签。
 
 import { chromium, type Page } from 'patchright';
 import WebSocket from 'ws';
@@ -12,6 +16,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { decodePushFrame } from '../pb.js';
 import { parseChat, parseLike, parseMember, parseRoomStats, parseRoomUserSeq, type UserProfile } from '../messages.js';
+import { decodeImFetchBody } from './backfill.js';
 
 const CORE_WS = process.env.CORE_WS_URL ?? 'ws://127.0.0.1:17730/agent';
 const TOKEN = process.env.AGENT_TOKEN ?? '';
@@ -21,12 +26,25 @@ const SERVER_DIR = path.resolve(HERE, '..', '..');               // server/
 const CORE_ENTRY = path.resolve(HERE, '..', 'index.ts');
 // 多路采集：抖音对点赞广播流是抽样下发（实测单连接 coverage 仅 3~8 成），
 // N 个并发标签各自独立抽样，core 按 msgId 去重合并 → 覆盖率指数提升。
-const TABS = Math.max(1, Math.min(4, Number(process.env.CAPTURE_TABS ?? 2)));
+// v0.3.0：curTabs 可由 core 的 set-tabs 指令运行时调整（EXP-3，上限仍 4）。
+const BASE_TABS = Math.max(1, Math.min(4, Number(process.env.CAPTURE_TABS ?? 2)));
+let curTabs = BASE_TABS;
+
+// ── 实验开关（EXP_FLAGS env 初始化；core 可经 exp-flags 指令热更新）──
+// totalAuthoritative 是 core/前端层实验，捕获进程不参与。
+interface CaptureExpFlags { fetchBackfill: boolean; adaptiveTabs: boolean; dualBufferRoom: boolean }
+let expFlags: CaptureExpFlags = { fetchBackfill: false, adaptiveTabs: false, dualBufferRoom: false };
+try {
+  const j = JSON.parse(process.env.EXP_FLAGS ?? '{}');
+  for (const k of Object.keys(expFlags) as (keyof CaptureExpFlags)[]) {
+    if (typeof j[k] === 'boolean') expFlags[k] = j[k];
+  }
+} catch { /* 坏 env 忽略，默认全关 */ }
 
 // ── 上报状态 ──
 interface ProfileEntry { nick: string; avatar: string | null; starGuard: boolean; dirty: boolean }
 const profiles = new Map<string, ProfileEntry>();   // secUid → 档案（变化才上报）
-let likeBatch: { i: string; c: number; u: string; t: number }[] = [];
+let likeBatch: { i: string; c: number; u: string; t: number; r?: string; bf?: number }[] = [];
 let profileBatch: { u: string; nick: string; av: string | null; sg: boolean }[] = [];
 let lastRoomSent = '';
 let lastOnlineSent = 0;
@@ -35,6 +53,8 @@ let shuttingDown = false;
 let wsConnectedAt = 0;          // 最近一次与 core 建连时刻（看护用）
 
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
+const expSend = (key: string, fields: Record<string, unknown>) =>
+  send({ t: 'exp-metrics', key, ...fields });
 
 function connectCore() {
   if (shuttingDown) return;
@@ -47,8 +67,10 @@ function connectCore() {
   });
   sock.on('message', raw => {
     let m: any; try { m = JSON.parse(raw.toString()); } catch { return; }
-    if (m.t === 'watch' && m.url) void watchRoom(String(m.url));
-    else if (m.t === 'reload') void reloadRoom();
+    if (m.t === 'watch' && m.url) void enqueue(() => watchRoom(String(m.url)));
+    else if (m.t === 'reload') void enqueue(() => reloadRoom());
+    else if (m.t === 'exp-flags' && m.flags) applyExpFlags(m.flags);
+    else if (m.t === 'set-tabs') void enqueue(() => setTabs(Number(m.n)));
     else if (m.t === 'shutdown') { log('收到 shutdown'); void gracefulExit(); }
   });
   sock.on('close', () => {
@@ -56,6 +78,25 @@ function connectCore() {
     if (!shuttingDown) { log('与 core 断开，3s 后重连'); setTimeout(connectCore, 3000); }
   });
   sock.on('error', () => { try { sock.terminate(); } catch {} });
+}
+
+/** 实验开关热更新（不重启进程） */
+function applyExpFlags(f: Record<string, unknown>) {
+  const before = { ...expFlags };
+  for (const k of Object.keys(expFlags) as (keyof CaptureExpFlags)[]) {
+    if (typeof f[k] === 'boolean') expFlags[k] = f[k] as boolean;
+  }
+  const changed = (Object.keys(expFlags) as (keyof CaptureExpFlags)[]).filter(k => expFlags[k] !== before[k]);
+  if (changed.length) log(`实验开关更新：${changed.map(k => `${k}=${expFlags[k]}`).join(' ')}`);
+}
+
+// ── 指令串行化：watch / reload / set-tabs / relaunch 的导航操作互斥，
+//    杜绝并发补页/导航/关页对 roomPages 的竞态（核查 D-4 修正）──
+let opChain: Promise<void> = Promise.resolve();
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const run = opChain.then(fn, fn);
+  opChain = run.then(() => {}, () => {});
+  return run;
 }
 
 // ── core 看护（互为守护闭环）：core 异常退出 → 本进程拉起 core ──
@@ -107,6 +148,13 @@ let currentRoomUrl = '';
 let lastStatusSent = '';
 let loggedIn = false;
 
+// 每页当前所在房间（framenavigated 维护；消息按页携带房间归属 r）
+const pageWebRid = new WeakMap<Page, string>();
+function updatePageWebRid(page: Page, url: string) {
+  const m = url.match(/live\.douyin\.com\/(\d{6,13})/);
+  pageWebRid.set(page, m ? m[1] : '');
+}
+
 const sendStatus = (state: string, reason?: string) => {
   if (state !== lastStatusSent || state === 'offline' || state === 'risk') {
     lastStatusSent = state;
@@ -152,6 +200,7 @@ async function launchBrowser() {
   } catch { log('登录态检测失败（按匿名处理）'); }
   roomPages = myCtx.pages().length ? myCtx.pages().slice(0, 1) : [await myCtx.newPage()];
   wirePage(roomPages[0]);
+  for (const p of roomPages) updatePageWebRid(p, p.url());
   myCtx.on('page', p => { wirePage(p); });   // 用户/抖音自行开的标签也纳入监听
   myCtx.on('close', () => {
     // 关键：旧上下文的 close 不能触发新一轮重启。relaunch 会先置空 ctx 再 close 旧上下文，
@@ -163,7 +212,18 @@ async function launchBrowser() {
       scheduleRelaunch(8000);
     }
   });
-  log(`Chrome 已启动（捕获窗口，采集路数=${TABS}）`);
+  // EXP-4：预开标签（仅实验开启时；空白页对状态机无影响——roomMonitor 只看首页）
+  if (expFlags.dualBufferRoom && roomPages.length < curTabs) {
+    while (roomPages.length < curTabs) {
+      const extra = await myCtx.newPage().catch(() => null);
+      if (!extra) break;
+      roomPages.push(extra);   // wirePage 由 on('page') 自动完成
+      updatePageWebRid(extra, 'about:blank');
+    }
+    log(`[实验:换房] 双缓冲预开 ${roomPages.length} 个标签`);
+    expSend('dualBufferRoom', { ev: 'preopen-tabs', n: roomPages.length });
+  }
+  log(`Chrome 已启动（捕获窗口，采集路数=${curTabs}）`);
 }
 
 let relaunchTimes: number[] = [];
@@ -195,7 +255,7 @@ async function relaunch() {
     ctx = null;                              // 先置空，旧上下文的 close 事件不再触发重启
     try { await old?.close(); } catch {}
     await ensureBrowser();
-    if (currentRoomUrl) await gotoRoom(currentRoomUrl);
+    if (currentRoomUrl) await enqueue(() => gotoRoom(currentRoomUrl, 'relaunch'));
   } catch (e) {
     log('浏览器重启失败', e);
     killStaleChrome();                       // profile 被残留进程占用时的防呆清理
@@ -205,15 +265,28 @@ async function relaunch() {
   }
 }
 
+// ── 页面接线：WeakSet 防双注册（v0.3.0 修复：newPage() 既触发 ctx.on('page')
+//    又被 gotoRoom 手动 wire，历史上每帧解码两次，全靠 core msgId 去重兜底）──
+const wiredPages = new WeakSet<Page>();
 function wirePage(page: Page) {
-  // 导航诊断：被踢/换房/登录重定向都从这里留下证据
+  if (wiredPages.has(page)) return;
+  wiredPages.add(page);
+  // 导航诊断：被踢/换房/登录重定向都从这里留下证据；同时维护消息归属 webRid
   page.on('framenavigated', frame => {
-    if (frame === page.mainFrame()) log('页面导航 →', frame.url().slice(0, 140));
+    if (frame !== page.mainFrame()) return;
+    log('页面导航 →', frame.url().slice(0, 140));
+    updatePageWebRid(page, frame.url());
   });
   // HTTP 侧：房间 enter/info 接口响应里有稳定的主播名（实测结构 data.room.data.owner）
   page.on('response', async res => {
     try {
       const u = res.url();
+      // EXP-2 进房补帧：页面自发请求的 /webcast/im/fetch（need_persist_msg_count），
+      // 响应含最近 15 条持久化消息——零额外请求的官方补帧（报告 B 4.2-2）
+      if (expFlags.fetchBackfill && u.includes('/webcast/im/fetch')) {
+        void handleImFetchResponse(res, page);
+        return;
+      }
       if (!/live\.douyin\.com\/webcast\/room\//.test(u) || !/info|enter/.test(u)) return;
       const json = await res.json();
       const room = json?.data?.room?.data ?? json?.data?.room ?? json?.data;
@@ -228,13 +301,83 @@ function wirePage(page: Page) {
         const p = frame.payload;
         const buf = Buffer.isBuffer(p) ? p : Buffer.from(String(p));
         lastFrameAt = Date.now();                 // 任何帧（含心跳 "hi"）都是生命迹象
+        // EXP-4：双缓冲切换期旧房保留帧计数（平滑度证据；这些帧经 r 归属被 core 拦截不入账）
+        if (dualSwitchActive && pageWebRid.get(page) && pageWebRid.get(page) !== switchTargetRid) keptFrames++;
         if (buf.length < 8) return;               // 心跳 "hi" 等
         const msgs = decodePushFrame(buf);
         if (!msgs) return;
-        for (const m of msgs) handleMsg(m.method, m.payload);
+        for (const m of msgs) handleMsg(m.method, m.payload, page);
       } catch { /* 帧解码失败忽略 */ }
     });
   });
+}
+
+// ── EXP-2：im/fetch 补帧 ──
+let bfPending: { i: string; c: number; u: string; t: number; r: string; bf: 1 }[] = [];
+const bfStats = { decoded: 0, failed: 0 };        // 周期计数（30s 上报后清零）
+/** core 已确认会话的房间（roomMonitor 换房识别 sendRoom 后记录）——补帧只在该房间就绪后放行，
+ *  保证 core 先切会话、补帧后入账（避免计入旧场或被 !sessionId 丢弃，核查 B-3/E-1） */
+let announcedWebRid = '';
+
+async function handleImFetchResponse(res: { body: () => Promise<Buffer> }, page: Page) {
+  let body: Buffer | null = null;
+  try { body = await res.body(); }
+  catch (e) { bfStats.failed++; log('[实验:补帧] im/fetch body 读取失败（页面销毁/detach）', String(e).slice(0, 80)); return; }
+  const r = decodeImFetchBody(body);
+  if (r.format === 'empty') {
+    bfStats.failed++;
+    log(`[实验:补帧] im/fetch 解码失败：${r.note ?? '未知'}（len=${body?.length ?? 0}）`);
+    return;
+  }
+  if (!r.msgs.length) return;
+  bfStats.decoded += r.msgs.length;
+  const webRid = pageWebRid.get(page) ?? '';
+  let likes = 0, members = 0;
+  for (const m of r.msgs) {
+    if (m.method === 'WebcastLikeMessage') {
+      const like = parseLike(m.payload);
+      if (!like || !like.count) continue;
+      // total 是进房前历史值：core 侧 src='bf' 不会用它锚定基线，仅做兜底去重键
+      bfPending.push({ i: like.msgId, c: like.count, u: like.secUid, t: like.total, r: webRid, bf: 1 });
+      noteProfile({ secUid: like.secUid, nick: like.nick, avatar: like.avatar, starGuard: like.starGuard });
+      likes++;
+    } else if (m.method === 'WebcastMemberMessage') {
+      const mem = parseMember(m.payload);
+      if (mem.user) { noteProfile(mem.user); members++; }
+    } else if (m.method === 'WebcastChatMessage') {
+      const chat = parseChat(m.payload);
+      if (chat.user) noteProfile(chat.user);
+    }
+  }
+  maybeFirstData(webRid);
+  log(`[实验:补帧] im/fetch ${r.format} 解码 ${r.msgs.length} 条（点赞 ${likes} / 进场 ${members}），待会话就绪后入账`);
+  if (bfPending.length > 500) bfPending.splice(0, bfPending.length - 500);  // 换房途中滞留防泄漏
+}
+
+// ── EXP-4：换房打点状态 ──
+let switchTargetRid = '';       // 本次换房目标房间
+let switchT0 = 0;               // 换房开始时刻
+let firstDataRid = '';          // 已打 first-data 的房间（每房一次）
+let dualSwitchActive = false;   // 双缓冲切换进行中（旧房保留帧计数窗口）
+let keptFrames = 0;             // 本次切换期间旧房保留帧数
+
+function maybeFirstData(rid: string | undefined) {
+  if (!expFlags.dualBufferRoom || !rid || !switchT0 || rid !== switchTargetRid || firstDataRid === rid) return;
+  firstDataRid = rid;
+  expSend('dualBufferRoom', { ev: 'first-data', ms: Date.now() - switchT0 });
+}
+
+// ── EXP-3：多路 msgId 重叠率采样（判定"并集>单路"假设真伪的最直接指标）──
+const overlapSeen = new Map<string, number | 'dup'>();   // msgId → 首见页下标或 'dup'（LRU 5000）
+function noteOverlap(msgId: string, page: Page) {
+  if (!msgId || msgId === '0') return;
+  const prev = overlapSeen.get(msgId);
+  if (prev === undefined) {
+    overlapSeen.set(msgId, roomPages.indexOf(page));
+    if (overlapSeen.size > 5000) overlapSeen.delete(overlapSeen.keys().next().value as string);
+  } else if (prev !== 'dup') {
+    overlapSeen.set(msgId, 'dup');
+  }
 }
 
 // ── WS 静默看门狗（长跑自愈）：断网/睡眠唤醒/页面假死 → 刷新 → 重建 ──
@@ -253,15 +396,22 @@ setInterval(() => {
   } else {
     wdReloads++;
     log(`WS 静默 ${Math.round(silentMs / 1000)}s → 刷新页面自愈 (#${wdReloads})`);
-    void reloadRoom();
+    void enqueue(() => reloadRoom());
   }
 }, 20_000);
 
-function handleMsg(method: string, payload: Buffer) {
+function handleMsg(method: string, payload: Buffer, page?: Page) {
   if (method === 'WebcastLikeMessage') {
     const like = parseLike(payload);
     if (!like || !like.count) return;
-    likeBatch.push({ i: like.msgId, c: like.count, u: like.secUid, t: like.total });
+    if (page) noteOverlap(like.msgId, page);
+    const rid = page ? pageWebRid.get(page) : undefined;
+    maybeFirstData(rid);
+    // 消息房间归属：任一相关实验开启时携带 r，core 校验归属（防跨房污染；全关时不携带，报文与旧版一致）
+    const tagOn = expFlags.fetchBackfill || expFlags.dualBufferRoom;
+    likeBatch.push(tagOn && rid
+      ? { i: like.msgId, c: like.count, u: like.secUid, t: like.total, r: rid }
+      : { i: like.msgId, c: like.count, u: like.secUid, t: like.total });
     noteProfile({ secUid: like.secUid, nick: like.nick, avatar: like.avatar, starGuard: like.starGuard });
   } else if (method === 'WebcastMemberMessage') {
     const mem = parseMember(payload);
@@ -280,26 +430,71 @@ function handleMsg(method: string, payload: Buffer) {
   }
 }
 
-async function gotoRoom(url: string) {
+async function gotoRoom(url: string, via: 'watch' | 'relaunch' = 'watch') {
   if (!ctx) return;
-  log(`进入房间 ${url}（${TABS} 路）`);
+  const dual = expFlags.dualBufferRoom && roomPages.length > 1;
   // 首路：主导航；其余路：补齐标签后同址导航
-  while (roomPages.length < TABS) {
+  while (roomPages.length < curTabs) {
     const extra = await ctx.newPage().catch(() => null);
     if (!extra) break;
-    roomPages.push(extra);
-    wirePage(extra);
+    roomPages.push(extra);   // wirePage 由 ctx.on('page') 自动完成
   }
-  await Promise.all(roomPages.map((p, i) =>
-    p.goto(i === 0 ? url : url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-      .catch(e => log(`goto[tab${i}]`, String(e).slice(0, 100)))));
+  const m = url.match(/live\.douyin\.com\/(\d{6,13})/);
+  switchTargetRid = m ? m[1] : '';
+  switchT0 = dual ? Date.now() : switchT0;
+  log(`进入房间 ${url}（${curTabs} 路${dual ? ' · 双缓冲两阶段' : ''}）`);
+  if (dual) {
+    // EXP-4：阶段 A 首路先走，期间其余页保持旧房推送（旧房数据连续）；
+    // 阶段 B 其余页再切。旧房页消息经 r 归属由 core 拦截，不会污染新房会话。
+    dualSwitchActive = true; keptFrames = 0;
+    expSend('dualBufferRoom', { ev: 'switch-start', via });
+    await roomPages[0].goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      .catch(e => log(`goto[tab0]`, String(e).slice(0, 100)));
+    expSend('dualBufferRoom', { ev: 'phase-a-done', ms: Date.now() - switchT0 });
+    await Promise.all(roomPages.slice(1).map(p =>
+      p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+        .catch(e => log(`goto[tab${roomPages.indexOf(p)}]`, String(e).slice(0, 100)))));
+    dualSwitchActive = false;
+    expSend('dualBufferRoom', { ev: 'phase-b-done', ms: Date.now() - switchT0, totalMs: Date.now() - switchT0, keptFrames });
+  } else {
+    await Promise.all(roomPages.map((p, i) =>
+      p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+        .catch(e => log(`goto[tab${i}]`, String(e).slice(0, 100)))));
+  }
   await detectAnchor().catch(() => {});
 }
 
 async function watchRoom(url: string) {
   currentRoomUrl = url;
   if (!ctx) await ensureBrowser().catch(async e => { log('launch fail', e); await relaunch(); });
-  await gotoRoom(url);
+  await gotoRoom(url, 'watch');
+}
+
+/** EXP-3：core 指令运行时调整采集路数（1~4；ack 回执） */
+async function setTabs(n: number) {
+  n = Math.max(1, Math.min(4, Math.floor(n)));
+  if (!ctx || !currentRoomUrl || !/live\.douyin\.com\/\d{6,13}/.test(currentRoomUrl)) {
+    // 未进房/浏览器不在：只记账，下次 gotoRoom 自然按 curTabs 补齐
+    curTabs = n;
+    log(`[实验:并发] 采集路数 → ${n}（未在房，仅记账）`);
+    send({ t: 'tabs-ack', n });
+    return;
+  }
+  if (n > curTabs) {
+    while (roomPages.length < n) {
+      const extra = await ctx.newPage().catch(() => null);
+      if (!extra) break;
+      roomPages.push(extra);
+    }
+    await Promise.all(roomPages.slice(curTabs).map(p =>
+      p.goto(currentRoomUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})));
+  } else if (n < curTabs) {
+    const drop = roomPages.splice(n);   // 保留 roomPages[0..n)
+    for (const p of drop) await p.close().catch(() => {});
+  }
+  curTabs = n;
+  log(`[实验:并发] 采集路数 → ${n}`);
+  send({ t: 'tabs-ack', n });
 }
 
 async function reloadRoom() {
@@ -368,6 +563,7 @@ async function roomMonitor() {
     sendStatus('watching');   // 已进房即“监听中”，不必等第一条点赞（安静房间否则永远显示启动中）
     lastLikeTotal = 0; statsRetries = 0;
     sendRoom(true);
+    announcedWebRid = url.match(/live\.douyin\.com\/(\d{6,13})/)![1];   // core 会话已就绪 → 补帧放行
     anchorRetries = 0;   // 主播名异步重试（进房瞬间元素未渲染，实测需等 2~6s）
     await detectAnchor().catch(() => {});
     await detectRoomStats().catch(() => {});
@@ -408,8 +604,14 @@ function sendRoom(force: boolean) {
   send({ t: 'room', webRid, anchor: anchor || null, online: lastOnlineSent, likeTotal: lastLikeTotal || undefined });
 }
 
-// ── 200ms 批量上报 + 档案分离 ──
+// ── 200ms 批量上报 + 档案分离 + 补帧放行 ──
 setInterval(() => {
+  // EXP-2：只放行 core 会话已就绪（announcedWebRid 匹配）的补帧消息
+  if (bfPending.length && announcedWebRid) {
+    const stay: typeof bfPending = [];
+    for (const x of bfPending) (x.r === announcedWebRid ? likeBatch : stay).push(x as any);
+    bfPending = stay;
+  }
   if (likeBatch.length) { send({ t: 'likes', batch: likeBatch, at: Date.now() }); likeBatch = []; }
   if (profileBatch.length || [...profiles.values()].some(p => p.dirty)) {
     profileBatch = [];
@@ -418,6 +620,21 @@ setInterval(() => {
     if (list.length) send({ t: 'profiles', list });
   }
 }, 200);
+
+// ── 实验打点周期上报（30s）：补帧解码统计 / 多路重叠率采样 ──
+setInterval(() => {
+  if (shuttingDown) return;
+  if (bfStats.decoded || bfStats.failed) {
+    expSend('fetchBackfill', { decoded: bfStats.decoded, failed: bfStats.failed });
+    bfStats.decoded = 0; bfStats.failed = 0;
+  }
+  if (overlapSeen.size) {
+    let dup = 0;
+    for (const v of overlapSeen.values()) if (v === 'dup') dup++;
+    expSend('adaptiveTabs', { overlapTotal: overlapSeen.size, overlapHits: dup });
+    overlapSeen.clear();
+  }
+}, 30_000);
 
 setInterval(() => { void roomMonitor(); }, 2000);
 
@@ -433,7 +650,7 @@ process.on('SIGTERM', () => void gracefulExit());
 
 // ── main ──
 (async () => {
-  log('捕获进程启动', { CORE_WS, PROFILE_DIR });
+  log('捕获进程启动', { CORE_WS, PROFILE_DIR, expFlags });
   connectCore();
   try { await ensureBrowser(); }
   catch (e) {

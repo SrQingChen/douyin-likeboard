@@ -14,6 +14,8 @@ const ROOT = path.resolve(here, '..', '..');
 function captureEnv(): Record<string, string> {
   const env: Record<string, string> = {
     CAPTURE_TABS: String(getConfig().captureTabs),
+    // 实验开关随进程传递（重启后不丢；运行时经 exp-flags 指令热更新）
+    EXP_FLAGS: JSON.stringify(getConfig().experimental),
     // Chrome 缺失 → capture 走内置 Chromium（防呆：空白机也能跑，日志会提示）
     CAPTURE_FORCE_CHANNEL: browserInfo.kind === 'chrome' ? '' : (browserInfo.kind === 'bundled-chromium' ? 'bundled' : ''),
   };

@@ -4,6 +4,7 @@ import type { WebSocket } from 'ws';
 import type { Engine } from './engine.js';
 import type { Hub } from './hub.js';
 import { ensureAvatar } from './avatars.js';
+import { getConfig } from './config.js';
 
 export interface AgentHooks {
   /** 捕获进程 hello 时返回应恢复观看的房间 URL（无则 null） */
@@ -33,6 +34,10 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
             engine.setCaptureState('starting');
             const resume = hooks.getResumeUrl?.() ?? null;
             if (resume) send({ t: 'watch', url: resume });
+            // 实验状态重同步（进程/浏览器重启后不丢）：flags + 生效路数
+            send({ t: 'exp-flags', flags: getConfig().experimental });
+            const eff = engine.exp?.effectiveTabsOf();
+            if (eff && eff > getConfig().captureTabs) send({ t: 'set-tabs', n: eff });
             break;
           }
           case 'profiles': {
@@ -45,15 +50,21 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
             break;
           }
           case 'likes': {
-            const batch: { i: string; c: number; u: string; t?: number }[] = m.batch ?? [];
+            const batch: { i: string; c: number; u: string; t?: number; r?: string; bf?: number }[] = m.batch ?? [];
             const at = m.at ?? Date.now();
-            let applied = 0;
             for (const b of batch) {
               if (!b?.u || !b.c) continue;
-              if (engine.addLike(b.u, Math.max(0, b.c | 0), b.i ?? '', b.t ?? 0, at)) applied++;
+              // 消息房间归属（实验特性）：报文带 r 且与当前会话不符 → 丢弃
+              // （双缓冲换房期旧房页消息 / 换房时序窗内跨房消息，防止污染新会话与 total 基线）
+              if (b.r && b.r !== engine.agg.room.webRid) {
+                engine.exp?.noteCrossRoomDrop();
+                continue;
+              }
+              const src = b.bf === 1 ? 'bf' : 'ws';
+              const ok = engine.addLike(b.u, Math.max(0, b.c | 0), b.i ?? '', b.t ?? 0, at, src);
+              engine.exp?.noteLike(src, ok, Math.max(0, b.c | 0), b.u, at);
             }
             engine.captureState = 'watching';
-            void applied;
             break;
           }
           case 'chat': {
@@ -73,6 +84,16 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
             else if (m.state === 'offline') engine.setCaptureState('offline', m.reason);
             else if (m.state === 'risk') engine.setCaptureState('risk', m.reason);
             else engine.setCaptureState(m.state ?? 'starting', m.reason);
+            break;
+          }
+          case 'exp-metrics': {
+            // 捕获层实验打点：{ t:'exp-metrics', key, ...fields }
+            if (typeof m.key === 'string') engine.exp?.noteCapture(m.key as any, m as Record<string, unknown>);
+            break;
+          }
+          case 'tabs-ack': {
+            // set-tabs 回执：{ t:'tabs-ack', n }
+            if (typeof m.n === 'number') engine.exp?.confirmTabs(m.n);
             break;
           }
         }
@@ -96,11 +117,13 @@ export function registerAgent(app: FastifyInstance, engine: Engine, hub: Hub, to
   });
 }
 
-/** 向捕获进程广播指令（watch/reload/shutdown） */
+/** 向捕获进程广播指令（watch/reload/shutdown/exp-flags/set-tabs） */
 export const agentCtl = {
   senders: new Set<(o: unknown) => void>(),
   watch(url: string) { this.broadcast({ t: 'watch', url }); },
   reload() { this.broadcast({ t: 'reload' }); },
   shutdown() { this.broadcast({ t: 'shutdown' }); },
+  expFlags(flags: unknown) { this.broadcast({ t: 'exp-flags', flags }); },
+  setTabs(n: number) { this.broadcast({ t: 'set-tabs', n }); },
   broadcast(o: unknown) { for (const s of this.senders) s(o); },
 };

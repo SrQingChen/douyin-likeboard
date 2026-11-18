@@ -13,7 +13,24 @@ export interface AppConfig {
   checkpointSec: number;        // 轮内 checkpoint 间隔
   surgeThreshold: number;       // 高能冲刺阈值（10s 窗口折算 赞/分；达到即触发鎏金动效，免费）
   captureTabs: number;          // 捕获并发标签数（1~4）；越多覆盖率略高，资源占用更高
+  experimental: ExperimentalFlags; // 实验性功能（默认全关；关闭时系统行为与既有版本一致）
 }
+
+export interface ExperimentalFlags {
+  totalAuthoritative: boolean;  // EXP-1 房间「本场点赞」改用官方权威口径 total−进房基线
+  fetchBackfill: boolean;       // EXP-2 被动旁听页面自发的 /webcast/im/fetch 响应（进房补帧）
+  adaptiveTabs: boolean;        // EXP-3 洪峰期按窗口完整度动态升降采集路数（≤4）
+  dualBufferRoom: boolean;      // EXP-4 换房两阶段导航 + 旧标签保留旧房推送
+}
+
+export const DEFAULT_EXPERIMENTAL: ExperimentalFlags = {
+  totalAuthoritative: false,
+  fetchBackfill: false,
+  adaptiveTabs: false,
+  dualBufferRoom: false,
+};
+
+export const EXPERIMENTAL_KEYS = Object.keys(DEFAULT_EXPERIMENTAL) as (keyof ExperimentalFlags)[];
 
 export const DEFAULT_CONFIG: AppConfig = {
   port: 17730,
@@ -26,7 +43,20 @@ export const DEFAULT_CONFIG: AppConfig = {
   checkpointSec: 30,
   surgeThreshold: 300,
   captureTabs: 2,
+  experimental: { ...DEFAULT_EXPERIMENTAL },
 };
+
+/** experimental 键级清洗：未知键丢弃、值强制 boolean */
+function sanitizeExperimental(raw: unknown): ExperimentalFlags {
+  const out = { ...DEFAULT_EXPERIMENTAL };
+  if (raw && typeof raw === 'object') {
+    for (const k of EXPERIMENTAL_KEYS) {
+      const v = (raw as Record<string, unknown>)[k];
+      if (typeof v === 'boolean') out[k] = v;
+    }
+  }
+  return out;
+}
 
 /** 从 import.meta.url 稳健定位项目根（fileURLToPath 处理 Windows 盘符） */
 function detectRoot(): string {
@@ -60,7 +90,8 @@ let current: AppConfig = { ...DEFAULT_CONFIG };
 export function loadConfig(): AppConfig {
   try {
     const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-    current = { ...DEFAULT_CONFIG, ...raw };
+    // experimental 深合并：浅展开会让部分写入的对象丢键（undefined 而非 false）
+    current = { ...DEFAULT_CONFIG, ...raw, experimental: sanitizeExperimental(raw.experimental) };
   } catch { current = { ...DEFAULT_CONFIG }; }
   return current;
 }
@@ -71,7 +102,7 @@ export function getConfig(): AppConfig { return current; }
 export function patchConfig(patch: Partial<AppConfig>): AppConfig {
   // 白名单：未知键一律忽略（验证 P2-③）
   const ALLOWED: (keyof AppConfig)[] = ['roundMinutes', 'rankBasis', 'boardCount',
-    'autostartCapture', 'lastRoomUrl', 'cappedThreshold', 'checkpointSec', 'surgeThreshold', 'captureTabs'];
+    'autostartCapture', 'lastRoomUrl', 'cappedThreshold', 'checkpointSec', 'surgeThreshold', 'captureTabs', 'experimental'];
   const p: Partial<AppConfig> = {};
   for (const k of ALLOWED) if (patch[k] !== undefined) (p as any)[k] = patch[k];
   // 白名单 + 边界钳制
@@ -81,7 +112,16 @@ export function patchConfig(patch: Partial<AppConfig>): AppConfig {
   if (p.cappedThreshold !== undefined) p.cappedThreshold = Math.min(3000, Math.max(500, Math.floor(p.cappedThreshold)));
   if (p.surgeThreshold !== undefined) p.surgeThreshold = Math.min(3000, Math.max(50, Math.floor(p.surgeThreshold)));
   if (p.captureTabs !== undefined) p.captureTabs = Math.min(4, Math.max(1, Math.floor(p.captureTabs)));
+  // experimental：PATCH 语义 = 只覆盖显式 boolean 的键；非 boolean / 未知键视为无效输入忽略（保留现值），
+  // 不回 DEFAULT（区别于 loadConfig 的"磁盘缺失=默认"语义）
+  let expMerged: ExperimentalFlags | undefined;
+  if (p.experimental !== undefined) {
+    const patchExp = p.experimental as unknown as Record<string, unknown>;
+    expMerged = { ...current.experimental };
+    for (const k of EXPERIMENTAL_KEYS) if (typeof patchExp[k] === 'boolean') expMerged[k] = patchExp[k] as boolean;
+  }
   current = { ...current, ...p };
+  if (expMerged) current.experimental = sanitizeExperimental(expMerged);
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(current, null, 2), 'utf-8');
   return current;

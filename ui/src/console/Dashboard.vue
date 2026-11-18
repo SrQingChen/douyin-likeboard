@@ -51,6 +51,11 @@ async function restartCapture() {
 }
 
 const snap = computed(() => roState.snap);
+// EXP-1 权威总量口径：实验开启且已锚定基线时，房间总量显示官方累计值（total−进房基线）
+const authoritativeOn = computed(() => snap.value?.exp?.flags?.totalAuthoritative === true
+  && (snap.value?.room.authoritativeLikes ?? -1) >= 0);
+const sessionDisplayTotal = computed(() =>
+  authoritativeOn.value ? (snap.value?.room.authoritativeLikes ?? 0) : (snap.value?.room.sessionLikes ?? 0));
 // 房间实时数优先用 1s WS 快照（比 3s 轮询的 /api/status 快）；未就绪显示 — 而不是 0
 const liveOnline = computed(() => snap.value?.room.online ?? status.value?.room?.online ?? 0);
 const liveRoomTotal = computed(() => snap.value?.room.roomTotal ?? status.value?.room?.roomTotal ?? -1);
@@ -117,8 +122,10 @@ const sparkPath = computed(() => {
       <h2 class="font-bold text-[14px]">📊 本场实况 <span class="text-[11px] font-normal text-white/45">（第 {{ status?.round?.idx ?? 1 }} 轮 · {{ snap?.round.basis === 'session' ? '按本场排序' : '按本轮排序' }}）</span></h2>
       <div class="grid grid-cols-4 gap-3">
         <div class="glass rounded-xl p-3 text-center">
-          <div class="num text-[22px] font-black text-rose-300">{{ fmtNum(snap?.room.sessionLikes ?? 0) }}</div>
-          <div class="text-[11px] text-white/50 mt-0.5">本场总赞</div>
+          <div class="num text-[22px] font-black text-rose-300">{{ fmtNum(sessionDisplayTotal) }}</div>
+          <div class="text-[11px] text-white/50 mt-0.5">
+            本场总赞<span v-if="authoritativeOn" class="ml-1 text-[9px] px-1 py-px rounded bg-sky-400/15 text-sky-300 border border-sky-300/25 align-middle">官方口径</span>
+          </div>
         </div>
         <div class="glass rounded-xl p-3 text-center">
           <div class="num text-[22px] font-black text-sky-300">{{ fmtNum(snap?.room.ratePerMin ?? 0) }}</div>

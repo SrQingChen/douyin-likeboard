@@ -73,12 +73,20 @@ export function registerApi(app: FastifyInstance, engine: Engine, store: Store, 
   app.get('/api/config', async () => cfg());
   app.patch('/api/config', async (req) => {
     const before = getConfig().captureTabs;
+    const expBefore = getConfig().experimental;
     const next = patchConfig((req.body ?? {}) as any);
     // 并发标签数需要新进程才生效：捕获在跑时自动重启一次
     if (next.captureTabs !== before && engine.captureState !== 'disconnected') {
       hub.log(`捕获并发数 → ${next.captureTabs} 路，重启捕获生效…`);
       opts.onStopCapture();
       setTimeout(() => opts.onStartCapture(), 700);
+    }
+    // 实验开关：热下发（不重启捕获）；重启路径由 captureEnv 的 EXP_FLAGS 兜底
+    const expChanged = (Object.keys(next.experimental) as (keyof typeof next.experimental)[])
+      .some(k => next.experimental[k] !== expBefore[k]);
+    if (expChanged) {
+      engine.exp?.setRunning(next.experimental);
+      agentCtl.expFlags(next.experimental);
     }
     return next;
   });

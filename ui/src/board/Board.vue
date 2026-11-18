@@ -48,8 +48,11 @@ const roundSecsLeft = computed(() => {
   return Math.max(0, Math.floor((s.round.endsAt - nowTick.value) / 1000));
 });
 
-// 本场总赞滚动
-const sessionLikes = computed(() => snap.value?.room.sessionLikes ?? 0);
+// 本场总赞滚动（EXP-1：实验开启且基线已锚定时改用官方权威口径 total−进房基线）
+const authoritativeOn = computed(() => snap.value?.exp?.flags?.totalAuthoritative === true
+  && (snap.value?.room.authoritativeLikes ?? -1) >= 0);
+const sessionLikes = computed(() =>
+  authoritativeOn.value ? (snap.value?.room.authoritativeLikes ?? 0) : (snap.value?.room.sessionLikes ?? 0));
 const sessionDisplay = useCountUp(sessionLikes);
 
 // ── 高能冲刺状态（快照为权威源；1s 时钟驱动倒计时）──
@@ -150,6 +153,7 @@ const captureDown = computed(() => ['disconnected', 'offline', 'failed'].include
                   {{ fmtNum(Math.round(sessionDisplay)) }}
                 </span>
                 <span class="text-[11px] text-rose-200/70">本场赞</span>
+                <span v-if="authoritativeOn" class="text-[9px] px-1 py-px rounded bg-sky-400/15 text-sky-300 border border-sky-300/25 font-bold">官方口径</span>
               </div>
               <div class="text-[11px] text-white/45">
                 💨 {{ fmtNum(snap?.room.ratePerMin ?? 0) }}/分

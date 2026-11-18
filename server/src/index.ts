@@ -16,6 +16,7 @@ import { registerApi } from './api.js';
 import { CaptureCtl } from './capture-ctl.js';
 import { portFree, detectBrowser, projectRootFrom } from './env-check.js';
 import { APP_VERSION, setBrowserInfo } from './version.js';
+import { ExpTelemetry } from './experiments.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = projectRootFrom(HERE);
@@ -41,6 +42,13 @@ const engine = new Engine(store, {
   onLog: (m) => hub.log(m),
   onChat: (c) => hub.broadcast({ t: 'chat', data: c }),
 });
+
+// 实验性功能遥测（独立日志/评分/决策器；engine.exp 供 agent 打点）
+loadConfig();   // 先于 telemetry：确保读取用户保存的 experimental 开关
+const exp = new ExpTelemetry();
+exp.attachHub(hub);
+engine.exp = exp;
+exp.setRunning(getConfig().experimental);
 
 // token（/agent 鉴权，重启轮换）
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -96,6 +104,9 @@ setInterval(() => {
   if (shuttingDown) return; // 关闭中：不要再去碰已关闭的 DB/引擎
   engine.agg.tick(Date.now(), getConfig().cappedThreshold);
   engine.tickSurge(Date.now());
+  // 实验遥测：EXP-1/2 每秒采样 + EXP-3 决策器（仅开关开启时动作）
+  exp.tickSamples(engine);
+  exp.tickAdaptive(engine, Date.now(), n => agentCtl.setTabs(n));
   const rows = engine.snapshot(Date.now(), Math.max(100, getConfig().boardCount));
   const cfg = getConfig();
   // 按展示位切分（并列时 rank<=3 可能超过 3 人，用 rank 过滤会让多出来的人
@@ -108,6 +119,7 @@ setInterval(() => {
       webRid: engine.agg.room.webRid, anchor: engine.agg.room.anchor,
       online: engine.agg.room.online, roomTotal: engine.agg.room.roomTotal < 0 ? 0 : engine.agg.room.roomTotal,
       sessionLikes: engine.agg.room.sessionLikes,
+      authoritativeLikes: engine.agg.authoritativeLikes(),   // EXP-1 权威口径（-1=未锚定；纯附加字段）
       ratePerMin: engine.agg.roomRatePerMin(), peakRate: engine.agg.room.peakRate,
       coverage: Number(engine.agg.coveragePct().toFixed(2)),
     },
@@ -126,6 +138,7 @@ setInterval(() => {
       global: store.statsSummary() as any,
     },
     records: engine.records(),
+    exp: exp.fillEngineCompare(engine),   // 实验开关与多维评分（纯附加；全关时 flags 全 false）
   });
 }, 1000);
 

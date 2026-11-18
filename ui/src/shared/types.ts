@@ -19,6 +19,7 @@ export interface Snapshot {
   room: {
     webRid: string; anchor: string; online: number; roomTotal: number;
     sessionLikes: number; ratePerMin: number; peakRate: number; coverage: number;
+    authoritativeLikes?: number;   // EXP-1 权威口径（-1=未锚定；仅实验开启时前端使用）
   };
   round: { idx: number; startedAt: number; endsAt: number | null; basis: 'round' | 'session' };
   capture: string;
@@ -35,6 +36,20 @@ export interface Snapshot {
     holders?: { champion: { nick: string; v: number } | null; runner: { nick: string; v: number } | null; third: { nick: string; v: number } | null };
     global: { users: number; totalLikes: number; rounds: number; sessions: number };
   };
+  exp?: {
+    flags: Record<string, boolean>;
+    effectiveTabs: number;
+    baselineTabs: number;
+    metrics: Partial<Record<string, ExpMetric | undefined>>;
+  };
+}
+export interface ExpDim { key: string; label: string; value: number; unit: string }
+export interface ExpMetric {
+  running: boolean; since: number;
+  dims: ExpDim[];
+  score: number;
+  compare: Record<string, string | number>;
+  lastEvents: string[];
 }
 export interface SettleToast {
   roundIdx: number;

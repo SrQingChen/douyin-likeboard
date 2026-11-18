@@ -75,15 +75,57 @@ export class Aggregator {
   room = {
     webRid: '', anchor: '', online: 0,
     roomTotal: -1,
+    baselineTotal: -1,                       // 进房基线（EXP-1：authoritative = roomTotal − baseline）
+    baselineSource: '' as '' | 'dom' | 'ws', // 基线锚定来源（'dom' | 'ws'）
     counted: 0, totalDelta: 0,             // 完整度分子/分母
     sessionLikes: 0,
     rateRing: new Ring(),
+    totalRing: new Ring(),                  // 每秒 totalDelta 增量（EXP-3：60s 窗口 coverage 分母）
     peakRate: 0,
     lastMsgAt: 0,
   };
 
-  /** 点赞入账。返回 false = 重复消息被去重丢弃 */
-  addLike(secUid: string, count: number, msgId: string, totalHint: number, atMs: number): boolean {
+  /** 房间累计 total 单点维护（EXP-1）：首帧锚定 baseline；单调差值累计完整度。
+   *  engine.onRoom（DOM 首帧）与 addLike（WS total）都走这里，避免双写点分叉。
+   *  atMs 为消息时刻（totalRing 按消息时间入环，保证 60s 窗口口径正确）。
+   *  source='bf'（进房补帧）的 total 是进房前历史值，绝不锚定/更新——调用方负责不传。 */
+  noteRoomTotal(v: number, source: 'dom' | 'ws' = 'ws', atMs = Date.now()) {
+    if (!(v > 0)) return;
+    const sec = Math.floor(atMs / 1000);
+    if (this.room.roomTotal < 0) {
+      this.room.roomTotal = v;
+      this.room.baselineTotal = v;
+      this.room.baselineSource = source;
+      return;
+    }
+    if (v >= this.room.roomTotal) {
+      const d = v - this.room.roomTotal;
+      if (d <= 5000) { this.room.totalDelta += d; this.room.totalRing.add(sec, d); }
+      this.room.roomTotal = v;
+    } else {
+      this.room.roomTotal = v; // 回退（重置）：忽略
+    }
+  }
+
+  /** EXP-1 权威口径：本场点赞 = 房间累计 − 进房基线；无效（未锚定/负值）返回 -1 */
+  authoritativeLikes(): number {
+    const { roomTotal, baselineTotal } = this.room;
+    if (roomTotal < 0 || baselineTotal < 0) return -1;
+    return Math.max(0, roomTotal - baselineTotal);
+  }
+
+  /** EXP-3：60s 窗口完整度（Δcounted/Δtotal；窗口无数据返回 null，由决策器挂起） */
+  windowCoveragePct(nowMs = Date.now()): number | null {
+    const sec = Math.floor(nowMs / 1000);
+    const dt = this.room.totalRing.sum(sec, 60);
+    if (dt < 50) return null; // "近期有数据"门：安静房间/未进房不参与判定
+    return Math.min(150, (this.room.rateRing.sum(sec, 60) / dt) * 100);
+  }
+
+  /** 点赞入账。返回 false = 重复消息被去重丢弃。
+   *  src='bf'（进房补帧）：只入计数，不进速率环/不碰 roomTotal —— 补帧是历史消息，
+   *  按现在入环会造成假高能冲刺、速率尖峰与 total 基线污染（核查 C/B-2 修正）。 */
+  addLike(secUid: string, count: number, msgId: string, totalHint: number, atMs: number, src: 'ws' | 'bf' = 'ws'): boolean {
     // 去重键：正常情况下用 msgId（实测双标签收到同一事件的 msgId 完全一致）；
     // 极少数缺失/为 "0" 的消息退回 (secUid, total) —— total 是房间累计值，事件级唯一。
     const key = msgId && msgId !== '0'
@@ -100,25 +142,19 @@ export class Aggregator {
     const sec = Math.floor(atMs / 1000);
     const u = this.ensureUser(secUid, atMs);
     u.roundLikes += count; u.sessionLikes += count; u.lastActiveSec = sec;
-    u.secRing.add(sec, count);
-    u.minRing.add(Math.floor(sec / 60), count);
+    if (src === 'ws') {
+      u.secRing.add(sec, count);
+      u.minRing.add(Math.floor(sec / 60), count);
+    }
 
     this.room.sessionLikes += count;
     this.room.lastMsgAt = atMs;
-    this.room.rateRing.add(sec, count);
-    this.room.counted += count;
-
-    // 完整度：以 totalHint 单调递增差值累计；断崖跳变(>5000)不计缺口、回退则 rebase
-    if (totalHint > 0) {
-      if (this.room.roomTotal < 0) this.room.roomTotal = totalHint;
-      else if (totalHint >= this.room.roomTotal) {
-        const d = totalHint - this.room.roomTotal;
-        if (d <= 5000) this.room.totalDelta += d;
-        this.room.roomTotal = totalHint;
-      } else {
-        this.room.roomTotal = totalHint; // 回退（重置）：忽略
-      }
+    if (src === 'ws') {
+      this.room.rateRing.add(sec, count);
+      // 完整度：以 totalHint 单调递增差值累计；断崖跳变(>5000)不计缺口、回退则 rebase
+      if (totalHint > 0) this.noteRoomTotal(totalHint, 'ws', atMs);
     }
+    this.room.counted += count;
     return true;
   }
 
@@ -315,8 +351,9 @@ export class Aggregator {
     }
     this.room = {
       webRid: '', anchor: '', online: 0, roomTotal: -1,
+      baselineTotal: -1, baselineSource: '',
       counted: 0, totalDelta: 0, sessionLikes: 0,
-      rateRing: new Ring(), peakRate: 0, lastMsgAt: 0,
+      rateRing: new Ring(), totalRing: new Ring(), peakRate: 0, lastMsgAt: 0,
     };
     this.seenMsg.clear(); // 换房后 msgId 空间独立，清空去重窗防误杀
     this.gemColors.clear(); // 星守随机宝石色：每场首次出现时重新随机
