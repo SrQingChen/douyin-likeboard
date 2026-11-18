@@ -298,6 +298,7 @@ console.log('\n[7] ExpTelemetry：评分结构 / 对照表 / 独立日志 / 开�
   ok(ma.compare['开启口径_官方累计'] === 8, 'EXP-1 对照：官方累计 8');
   const m4 = m.metrics.dualBufferRoom;
   ok(!!m4 && m4.dims.length === 3, 'EXP-4 评分结构完整');
+  ok(m4.compare['最近换房首数据'] === '1.8s', 'EXP-4 遥测路由：first-data（key=dualBufferRoom）写入 firstDataMs', JSON.stringify(m4.compare['最近换房首数据']));
   ok(m4.compare['跨房拦截'] === 1, 'EXP-4 对照：跨房拦截计数');
   // 开关重置：关闭后 running=false，数据保留；再开启清零
   tel.setRunning({ ...flags, fetchBackfill: false });

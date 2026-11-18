@@ -212,12 +212,6 @@ export class ExpTelemetry {
     if (key === 'fetchBackfill') {
       if (typeof m.decoded === 'number') s.decodeOk += m.decoded;
       if (typeof m.failed === 'number') s.decodeFail += m.failed;
-      if (m.ev === 'first-data' && typeof m.ms === 'number') {
-        // EXP-4 新房首数据延迟（capture 打点）
-        const s4 = this.state('dualBufferRoom');
-        const cur = s4.switches[s4.switches.length - 1];
-        if (cur && cur.firstDataMs == null) cur.firstDataMs = m.ms;
-      }
     } else if (key === 'adaptiveTabs') {
       if (typeof m.overlapTotal === 'number') s.overlapTotal += m.overlapTotal;
       if (typeof m.overlapHits === 'number') s.overlapHits += m.overlapHits;
@@ -226,6 +220,10 @@ export class ExpTelemetry {
       if (ev === 'switch-start') {
         s.switches.push({ at: Date.now(), firstDataMs: null, keptFrames: 0, totalMs: null });
         if (s.switches.length > 20) s.switches.shift();
+      } else if (ev === 'first-data' && typeof m.ms === 'number') {
+        // 新房首数据延迟（capture 以 key='dualBufferRoom' 打点，此处才是正确路由）
+        const cur = s.switches[s.switches.length - 1];
+        if (cur && cur.firstDataMs == null) cur.firstDataMs = m.ms;
       } else if (ev === 'phase-b-done') {
         // 两阶段完成：记录全程耗时与切换期间旧房保留帧数（平滑度证据）
         const cur = s.switches[s.switches.length - 1];
