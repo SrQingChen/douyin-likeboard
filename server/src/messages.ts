@@ -12,7 +12,7 @@ export interface LikeMsg {
   secUid: string;       // 用户唯一键
   nick: string;
   avatar: string | null; // 归一化 URL
-  starGuard: boolean;    // 星守护（付费粉丝团高级身份，勋章 URL 含 star_guard）
+  starGuard: boolean;    // 星守护（付费粉丝团高级身份，勋章 URL 含 star_guard_advanced_badge）
 }
 
 export interface UserProfile {
@@ -51,9 +51,11 @@ function parseUser(buf: Buffer): (UserProfile & { masked: boolean }) | null {
     avatar = urls.length ? urls[0] : null;
   }
   if (!nick) nick = secUid.slice(-6); // 极端兜底
-  // 星守护：粉丝团勋章（f24.data.badge.icons）里会出现
-  // star_guard_advanced_badge_N_xmp.png；直接扫 URL 标记，避免跟随 proto 版本漂移。
-  const starGuard = buf.toString('latin1').includes('star_guard_');
+  // 星守护：真实抓包（frames6 夹具）确认星守勋章 URL 是 star_guard_advanced_badge_N_xmp.png，
+  // 且同一 URL 冗余出现在 User 的 f24/f61/f78 多个字段——因此保持全 buffer 扫描（防 proto 漂移，
+  // 不跟随字段号），但匹配串收紧到精确资产名：佩戴与星守相似效果（素材 URL 只含 star_guard_
+  // 前缀而无 advanced_badge 资产名）不会误标。2026-11-17 复核：夹具全部命中均为该资产名。
+  const starGuard = buf.toString('latin1').includes('star_guard_advanced_badge');
   return { secUid, nick, avatar: normalizeAvatarUrl(avatar), starGuard, masked: isMasked(nick) };
 }
 

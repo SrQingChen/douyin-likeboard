@@ -153,6 +153,10 @@ export class Store {
   setGemColor(secUid: string, color: string | null) {
     this.db.prepare(`UPDATE users SET gem_color=? WHERE sec_uid=?`).run(color, secUid);
   }
+  /** 手动星守修正（检测误标时双向纠偏；直接写，可清除，不用 MAX 单调递增） */
+  setStarGuard(secUid: string, v: boolean) {
+    this.db.prepare(`UPDATE users SET star_guard=? WHERE sec_uid=?`).run(v ? 1 : 0, secUid);
+  }
   getUsers(secUids: string[]): (UserRow | undefined)[] {
     const st = this.db.prepare(`SELECT * FROM users WHERE sec_uid=?`);
     return secUids.map(u => st.get(u) as UserRow | undefined);

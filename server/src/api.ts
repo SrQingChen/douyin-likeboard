@@ -133,6 +133,16 @@ export function registerApi(app: FastifyInstance, engine: Engine, store: Store, 
     return { ok: true, color };
   });
 
+  // 手动星守修正：value=true/false（检测误标时双向纠偏；作者彩蛋不依赖此开关）
+  app.patch('/api/user/:secUid/star-guard', async (req, reply) => {
+    const { secUid } = req.params as any;
+    const { value } = (req.body ?? {}) as { value?: boolean };
+    if (typeof value !== 'boolean') return reply.code(400).send({ ok: false, error: '缺少 value（true / false）' });
+    if (!store.getUser(secUid)) return reply.code(404).send({ ok: false, error: '用户不存在' });
+    engine.applyStarGuardOverride(secUid, value);
+    return { ok: true, starGuard: value };
+  });
+
   app.get('/api/rounds', async (req) => {
     const q = req.query as any;
     return store.roundsHistory(Math.min(50, Math.max(5, Number(q.limit ?? 20))), Math.max(0, Number(q.offset ?? 0)));

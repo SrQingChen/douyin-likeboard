@@ -21,7 +21,7 @@ const SETUP = args.includes('--setup');
 // OBS/直播伴侣的窗口枚举通常直接跳过，列表里看不到；该模式可被正常枚举/捕获。
 const CHROMA = args.includes('--chroma');
 const WINDOW_TITLE = CHROMA ? '多功能点赞统计助手（OBS兼容）' : '多功能点赞统计助手';
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const AUTHOR = 'SrQingChen';
 // 项目根：electron.exe desktop 启动时 appPath = desktop → 上级即根
 const ROOT = path.dirname(app.getAppPath ? app.getAppPath() : __dirname);
@@ -78,6 +78,10 @@ function createWindow() {
     width: W, height: H,
     minWidth: 300, minHeight: 420,
     frame: false,
+    // 透明窗口防呆：Win+↑ / 双击拖动条会最大化透明窗口 → 全屏遮挡桌面且榜单布局被拉伸
+    // 变形（视觉上就是“显示坏了”）。榜单窗口本就不应最大化/全屏，直接禁掉。
+    maximizable: false,
+    fullscreenable: false,
     // 透明窗口：逐像素透明（OBS 浏览器源/支持 WGC 的采集端可用）
     // 兼容窗口：普通不透明窗口 + 纯绿背景（OBS/直播伴侣窗口捕获 + Chroma Key）
     transparent: !CHROMA,

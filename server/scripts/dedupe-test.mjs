@@ -1,4 +1,4 @@
-// 去重回归：msgId 正常去重 + 缺失/0 时用 (secUid,total) 兜底
+// 去重回归：msgId 正常去重 + 缺失/0 时用 (secUid,total) 兜底（运行：node --import tsx scripts/dedupe-test.mjs）
 import { Aggregator } from '../src/aggregator.ts';
 
 let pass = 0, fail = 0;

@@ -46,6 +46,8 @@ const liveGem = computed(() => {
   return m;
 });
 function gemOf(u: any): string | null {
+  // 资格门与榜单 gemColorOf 一致：作者彩蛋或真实星守（手动关闭星守后用户库也不再显示宝石行）
+  if (!u.star_guard && !isAuthor(u.sec_uid)) return null;
   if (u.gem_color) return u.gem_color;
   const live = liveGem.value.get(u.sec_uid);
   if (live) return live;
@@ -74,6 +76,23 @@ async function setGem(color: string | null) {
     setTimeout(() => (gemMsg.value = null), 2500);
   } catch (e: any) { gemMsg.value = '设置失败：' + (e.message ?? e); }
   finally { gemBusy.value = false; }
+}
+
+// ── 星守护标记手动修正：检测误标时双向纠偏（后续再捕获到星守勋章会重新点亮）──
+const guardBusy = ref(false);
+const guardMsg = ref<string | null>(null);
+async function setGuard(v: boolean) {
+  if (!detail.value || guardBusy.value) return;
+  guardBusy.value = true; guardMsg.value = null;
+  try {
+    await patch(`/api/user/${encodeURIComponent(detail.value.user.sec_uid)}/star-guard`, { value: v });
+    detail.value.user.star_guard = v ? 1 : 0;
+    const target = rows.value.find(x => x.sec_uid === detail.value.user.sec_uid);
+    if (target) target.star_guard = v ? 1 : 0;
+    guardMsg.value = v ? '已标记为星守护' : '已取消星守护标记';
+    setTimeout(() => (guardMsg.value = null), 2500);
+  } catch (e: any) { guardMsg.value = '设置失败：' + (e.message ?? e); }
+  finally { guardBusy.value = false; }
 }
 
 // ── 一键清空用户库：红色弹窗 + 3 秒倒计时（防手滑）──
@@ -196,6 +215,22 @@ onScopeDispose(() => { clearInterval(wipeTimer); clearTimeout(flashTimer); });
             <div class="glass rounded-xl p-3"><div class="num text-[18px] font-black text-sky-300">{{ detail.user.best_speed ? fmtNum(detail.user.best_speed) + '/分' : '—' }}</div><div class="text-[11px] text-white/50">峰值手速</div></div>
             <div class="glass rounded-xl p-3"><div class="num text-[18px] font-black text-violet-300">{{ detail.user.sessions_seen }} 场 / {{ detail.user.rounds_seen }} 轮</div><div class="text-[11px] text-white/50">出场</div></div>
           </div>
+          <!-- 星守护标记：自动检测（勋章图标）+ 手动修正（星守状态按实际情况决定） -->
+          <section class="mb-4">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="font-bold text-[13px] text-white/70">✦ 星守护标记
+                <span v-if="detail.user.star_guard" class="ml-1 text-[10px] font-bold text-cyan-300/90">已标记</span>
+              </h3>
+              <div class="flex items-center gap-2">
+                <button class="btn" style="padding: 4px 10px; font-size: 11px"
+                  :disabled="guardBusy || !!detail.user.star_guard" @click="setGuard(true)">标记为星守</button>
+                <button class="btn" style="padding: 4px 10px; font-size: 11px"
+                  :disabled="guardBusy || !detail.user.star_guard" @click="setGuard(false)">取消标记</button>
+              </div>
+            </div>
+            <div v-if="guardMsg" class="text-[11.5px] text-emerald-300 mt-1.5">{{ guardMsg }}</div>
+            <p class="text-[11px] text-white/35 mt-1.5">自动依据：粉丝团勋章含星守护图标（star_guard_advanced_badge）；检测有误可手动修正，之后若再捕获到星守勋章会重新标记。</p>
+          </section>
           <!-- 宝石行配色：作者默认彩虹流光；星守默认每场随机一色，手动指定后固定 -->
           <section v-if="detail.user.star_guard || isAuthor(detail.user.sec_uid)" class="mb-4">
             <div class="flex items-center justify-between mb-2">

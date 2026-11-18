@@ -180,6 +180,13 @@ export class Engine {
     return r;
   }
 
+  /** 手动星守修正（详情抽屉开关）：DB 为权威源 + 聚合内存直写。
+   *  语义：捕获层之后再次上报该用户 sg=true 会重新点亮（新证据覆盖手动关闭）。 */
+  applyStarGuardOverride(secUid: string, v: boolean) {
+    this.store.setStarGuard(secUid, v);
+    this.agg.setStarGuard(secUid, v);
+  }
+
   /** 手动立即结算 */
   manualSettle(): SettleResult | null { return this.settleCurrent('manual'); }
 

@@ -151,6 +151,16 @@ export class Aggregator {
 
   markNotRookie(secUid: string) { const u = this.users.get(secUid); if (u) u.rookie = false; }
 
+  /** 手动修正星守身份（详情抽屉开关）：内存双字段直写。
+   *  不能只靠 refreshStoreInfoFor——它只把 u.starGuard 翻 true 不翻 false，
+   *  手动关闭必须同时清本场捕获标志与库镜像，否则快照仍按星守渲染。 */
+  setStarGuard(secUid: string, v: boolean) {
+    const u = this.users.get(secUid);
+    if (!u) return;                       // 不在内存：DB 已是权威源，下次入场自动加载
+    u.starGuard = v;
+    u.store = { ...u.store, starGuard: v };
+  }
+
   private ensureUser(secUid: string, atMs: number): UserAgg {
     let u = this.users.get(secUid);
     if (!u) {
@@ -235,15 +245,17 @@ export class Aggregator {
     return rows;
   }
 
-  /** 星守护：本场捕获到 or 库里曾标记（作者固定视为星守护，用于宝石行） */
+  /** 星守护：本场捕获到 or 库里曾标记（只看真实检测/手动修正，作者不再强制视为星守） */
   private isStarGuard(u: UserAgg): boolean {
-    return isAuthorSecUid(u.secUid) || u.starGuard || u.store.starGuard;
+    return u.starGuard || u.store.starGuard;
   }
 
-  /** 宝石色：手动指定 > 作者彩虹 > 星守本场随机；非星守返回 null（普通玻璃条） */
+  /** 宝石色：手动指定 > 作者彩虹 > 星守本场随机；宝石行资格=作者彩蛋或真实星守，其余返回 null（普通玻璃条） */
   private gemColors = new Map<string, string>();
   private gemColorOf(u: UserAgg): string | null {
-    if (!this.isStarGuard(u)) return null;
+    // 资格门：作者彩蛋保留（彩虹流光），星守按实际状态（不再强制把作者算作星守，
+    // 否则控制台实时排行的 ✦星守 标记会对作者恒显——星守状态必须反映真实身份）
+    if (!isAuthorSecUid(u.secUid) && !this.isStarGuard(u)) return null;
     if (u.store.gemColor) return u.store.gemColor;
     if (isAuthorSecUid(u.secUid)) return 'rainbow';
     let c = this.gemColors.get(u.secUid);
